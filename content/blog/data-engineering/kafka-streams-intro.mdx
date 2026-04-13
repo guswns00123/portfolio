@@ -1,0 +1,36 @@
+---
+title: "Kafka Streams 기초 정리"
+date: "2026-04-04"
+tags: ["kafka", "streaming", "java"]
+category: "data-engineering"
+description: "Kafka Streams의 핵심 개념과 아키텍처를 정리합니다."
+---
+
+## Kafka Streams란?
+
+Kafka Streams는 Apache Kafka 위에서 동작하는 클라이언트 라이브러리로, 실시간 스트림 처리를 위한 간단하고 가벼운 솔루션입니다.
+
+## 핵심 개념
+
+### KStream vs KTable
+
+- **KStream**: 레코드의 무한한 스트림. 각 레코드는 독립적인 이벤트.
+- **KTable**: 변경 로그(changelog) 스트림. 같은 키의 최신 값만 유지.
+
+```java
+KStream<String, String> stream = builder.stream("input-topic");
+KTable<String, Long> wordCounts = stream
+    .flatMapValues(value -> Arrays.asList(value.split("\\s+")))
+    .groupBy((key, word) -> word)
+    .count();
+```
+
+### Topology
+
+Kafka Streams 애플리케이션은 **Topology**로 정의됩니다. Source → Processor → Sink 구조로 데이터 흐름을 표현합니다.
+
+## 다음에 정리할 것
+
+- Windowing 개념
+- State Store
+- Exactly-once 처리 보장

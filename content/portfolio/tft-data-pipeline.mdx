@@ -1,0 +1,102 @@
+---
+title: "TFT 챌린저 유저 주간 경기 데이터 파이프라인"
+description: "Riot TFT API 기반 챌린저 유저 경기 데이터 수집·분석 파이프라인 구축 및 Tableau 대시보드 시각화"
+tags: ["Python", "Airflow", "AWS Lambda", "S3", "PostgreSQL", "SparkSQL", "Tableau", "Docker"]
+date: "2024-08-01"
+type: "personal"
+period: "2024.08 ~ 2024.10"
+highlight: "API 콜 제한 환경에서 Lambda 기반 분산 수집 설계"
+github: "https://github.com/guswns00123/TFT_data"
+---
+
+## 프로젝트 개요
+
+TFT(Teamfight Tactics) 게임의 최상위 챌린저 유저들이 **언제, 얼마나, 어떤 조합으로** 게임하는지에 대한 분석 데이터가 없어서 직접 파이프라인을 구축했습니다. Riot API를 활용해 챌린저 300명의 경기 데이터를 자동 수집하고, SparkSQL로 분석하여 Tableau 대시보드로 시각화하는 것이 목표였습니다.
+
+## 아키텍처
+
+![TFT 데이터 파이프라인 아키텍처](/images/tft-architecture.png)
+
+- **TFT API** → 유저 정보 및 경기 데이터 추출
+- **Airflow (Docker)** → DAG 스케줄링 및 Lambda 트리거
+- **AWS Lambda** → API 호출 및 데이터 수집 실행
+- **PostgreSQL** → 정규화된 스키마에 데이터 적재
+- **Amazon S3** → 배치 처리된 원본 데이터 저장
+- **PySpark SQL** → 대시보드용 분석 데이터 가공
+- **Tableau** → 주간 경기 분석 대시보드
+
+### 기술 선택 이유
+
+- **Airflow**: 주기적 배치 스케줄링 + 재시도 + Task 의존성 관리가 필요했기 때문
+- **Lambda로 전환한 이유**: 로컬 Airflow에서 직접 API를 다수 호출하면 메모리 초과로 heartbeat 에러가 발생하여 프로세스가 종료됨 → Airflow는 트리거만 담당하고, 실제 API 호출은 Lambda에서 처리하는 경량 구조로 전환
+- **PostgreSQL**: 정규화된 관계형 스키마로 유저-경기-유닛-특성 간 관계를 표현하기 적합
+
+## 데이터 설계
+
+### ER 구조
+
+![TFT 데이터 ER 구조](/images/tft-er-diagram.jpg)
+
+TFT 게임 특성상 매 판마다 유저들이 다양한 유닛과 특성(증강체)을 사용하기에, user_id와 game_id를 반복 저장하는 것은 비효율적입니다. 이를 고려하여 **User Game 테이블을 중심으로 6개 테이블로 정규화**하여 설계했습니다.
+
+- **유저**: 챌린저 유저 기본 정보 (puuid, tier, rank, LP 등)
+- **게임 정보**: 게임 메타데이터 (game_id, data_version)
+- **User Game**: 유저-게임 매핑 (FK: puuid, game_id)
+- **사용 유닛 / 사용 증강체 / 사용 특성**: 경기별 조합 정보
+- **게임 결과**: 경기 상세 (순위, 라운드, 골드, 데미지 등)
+
+### 챌린저 유저 변동 처리
+
+챌린저 유저는 매일 변동됩니다. 유저 테이블에 `tier`, `rank`, `leaguePoints` 필드를 두어 매일 유저 데이터 수집 시 현재 티어 정보를 갱신하고, 챌린저에서 강등된 유저도 기존 경기 데이터는 보존되도록 설계했습니다.
+
+## DAG 구성
+
+### User Data 적재 DAG (매일 새벽 1시)
+
+![User 데이터 적재 DAG](/images/tft-user-dag.png)
+
+API를 통해 챌린저 유저 데이터를 수집한 후 PostgreSQL에 적재하고, S3에는 배치 처리하여 백업 저장합니다.
+
+### Game Data 수집 DAG (매 2시간)
+
+![Game 데이터 수집 DAG](/images/tft-game-dag.png)
+
+Airflow에서 Lambda를 트리거하여 유저별 최근 경기 결과를 수집하고 PostgreSQL에 적재합니다. Lambda 함수는 동시에 호출하지 않고 **3개씩 단계적으로 트리거**하여 API 콜 제한을 준수합니다.
+
+## 트러블슈팅
+
+### 1. Airflow heartbeat 에러로 프로세스 종료
+
+- **Problem**: API 호출 Task 실행 시 다수의 API 콜로 인해 로컬 Airflow의 Worker 메모리가 초과되어 heartbeat 에러 발생, Airflow 프로세스가 종료됨
+- **Cause**: 로컬 환경의 제한된 리소스에서 Airflow가 직접 수백 건의 API를 호출하면서 메모리 부담 누적
+- **Solution**: Airflow는 Lambda를 trigger만 하는 경량 오케스트레이터 역할로 전환. 실제 API 호출과 데이터 처리는 Lambda에서 수행하도록 아키텍처 변경
+
+### 2. API 콜 제한으로 인한 데이터 누락
+
+- **Problem**: 경기 결과 데이터 수집 시 간헐적으로 데이터가 누락되는 현상 발생
+- **Cause**: TFT API의 Rate Limit에 걸려 일부 요청이 거부됨
+- **Solution**: Lambda 함수를 동시에 여러 개 트리거하지 않고, 3개씩 단계적으로 나누어 호출하여 API 콜 제한 내에서 안정적으로 수집
+
+## 결과물
+
+### 주간 챌린저 유저 경기 분석 대시보드
+
+![주간 챌린저 유저 대시보드](/images/tft-dashboard.png)
+
+SparkSQL을 활용하여 주간 경기 데이터를 집계·분석한 후 Tableau로 시각화했습니다.
+
+- 주간 총 경기 수 및 유저 수 추이
+- 요일별 경기 수 분포
+- **시간대별 플레이 빈도** — 챌린저 유저들이 주로 게임하는 시간대 파악
+- 인기 증강체/유닛 Top 5
+- 시간대별 최고 승률 유저 분석
+
+## 배운 점
+
+- 목적에 맞는 **데이터 스키마를 직접 설계**하는 것이 중요하며, 특히 반복 데이터가 많은 도메인에서는 정규화 설계가 저장 효율과 쿼리 성능에 큰 영향을 미친다는 것을 체감
+- API 콜 제한이 있는 환경에서 Lambda를 단계적으로 트리거하는 **분산 수집 전략**을 통해, 제약 조건 내에서 안정적으로 데이터를 확보하는 방법을 학습
+- 로컬 환경의 한계를 클라우드 서비스(Lambda, S3)로 보완하는 **하이브리드 아키텍처 설계** 경험
+
+## 아쉬운 점 / 개선 방향
+
+- **데이터 수집 규모의 한계**: API 콜 제한으로 챌린저 300명만 수집했으나, 실제로는 마스터/그랜드마스터 등 훨씬 많은 유저가 분포되어 있음. 다시 한다면 변경분만 수집하는 증분 수집(Incremental Load) 전략과 API 응답 캐싱을 적용하여 더 넓은 티어까지 커버해볼 것
