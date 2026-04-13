@@ -1,0 +1,282 @@
+---
+title: "Airflow 실무 운영에서 배운 설계 패턴 (3) — 운영 안정성"
+date: "2026-04-13"
+tags: ["airflow", "virtualenv", "retry", "callback", "pool"]
+category: "data-engineering"
+description: "VirtualEnv로 환경 격리하기, Retry/Pool로 외부 API 보호하기, Callback으로 장애 즉시 감지하기 — 파이프라인 운영 안정성을 높이는 패턴을 정리합니다."
+---
+
+## 들어가며
+
+파이프라인은 "만드는 것"보다 "운영하는 것"이 더 어렵다. 처음 배포했을 때는 잘 돌아가도, 시간이 지나면 라이브러리 버전이 바뀌고, 외부 API가 불안정해지고, 예상 못한 시점에 에러가 터진다.
+
+이 글에서는 실무에서 파이프라인 운영 안정성을 높이기 위해 적용한 네 가지 패턴을 정리한다.
+
+---
+
+## 1. 환경 격리 — ExternalPythonOperator와 VirtualEnv
+
+### 문제: 같은 코드인데 결과가 다르다
+
+실무에서 겪은 가장 당황스러운 버그 중 하나였다. 동일한 코드를 로컬 환경과 Airflow 환경에서 실행했는데 **산출 결과가 달랐다**.
+
+동일한 라이브러리, 동일한 버전이라고 생각했지만, 원인을 추적해보니 **pandas의 마이너 버전 차이**에서 정렬 동작이 달라진 것이 문제였다.
+
+```python
+# 기존 코드 — 정렬을 두 번 나누어 수행
+df = df.sort_values(["계약일"], ascending=True).reset_index(drop=True)
+df = df.sort_values(["계약년월"], ascending=True).reset_index(drop=True)
+```
+
+이 코드는 두 번째 `sort_values`가 첫 번째 정렬 결과를 덮어쓴다. 같은 `계약년월` 내에서 `계약일` 순서가 보존되는지 여부는 pandas의 정렬 안정성(sort stability) 구현에 달려 있다.
+
+**구버전 pandas**에서는 안정 정렬(stable sort)이 기본이라 첫 번째 정렬 순서가 유지되었고, **신버전**에서는 정렬 알고리즘 변경으로 순서가 보존되지 않았다. 결과적으로 "최신 계약 기준 단가"를 뽑아야 하는데, 정렬이 깨지면서 엉뚱한 값이 산출된 것이다.
+
+```python
+# 수정 — 정렬 기준을 한 번에 지정
+df = df.sort_values(
+    ["계약일", "계약년월"],
+    ascending=[True, True]
+).reset_index(drop=True)
+```
+
+### 근본 해결: 환경 자체를 격리
+
+코드를 수정하는 것으로 당장의 문제는 해결했지만, 근본적인 문제는 **Airflow 환경과 레거시 코드의 의존성이 충돌**한다는 것이었다. Airflow 자체가 사용하는 라이브러리 버전과, 레거시 산출 코드가 요구하는 버전이 다를 수 있다.
+
+Airflow는 이를 위해 [ExternalPythonOperator](https://airflow.apache.org/docs/apache-airflow/stable/_api/airflow/operators/python/index.html#airflow.operators.python.ExternalPythonOperator)와 [PythonVirtualenvOperator](https://airflow.apache.org/docs/apache-airflow/stable/_api/airflow/operators/python/index.html#airflow.operators.python.PythonVirtualenvOperator)를 제공한다.
+
+#### PythonVirtualenvOperator — 실행 시마다 venv 생성
+
+```python
+from airflow.operators.python import PythonVirtualenvOperator
+
+def legacy_calculation():
+    import pandas as pd
+    # 레거시 버전의 pandas로 실행
+    df = pd.read_csv("/data/input.csv")
+    result = calculate(df)
+    result.to_csv("/data/output.csv", index=False)
+
+legacy_task = PythonVirtualenvOperator(
+    task_id="run_legacy_code",
+    python_callable=legacy_calculation,
+    requirements=[
+        "pandas==1.5.3",       # 레거시 코드가 검증된 버전
+        "numpy==1.23.5",
+    ],
+    system_site_packages=False,  # Airflow 환경과 완전 격리
+)
+```
+
+매 실행마다 venv를 생성하기 때문에 **항상 동일한 환경이 보장**된다. 단, 생성 시간(수십 초)이 추가된다.
+
+#### ExternalPythonOperator — 사전 구축된 venv 사용
+
+실행마다 venv를 만드는 오버헤드가 부담이라면, 미리 venv를 구축해두고 경로만 지정할 수 있다:
+
+```bash
+# 서버에 레거시 환경을 사전 구축
+python3 -m venv /opt/venvs/legacy_env
+/opt/venvs/legacy_env/bin/pip install pandas==1.5.3 numpy==1.23.5
+```
+
+```python
+from airflow.operators.python import ExternalPythonOperator
+
+legacy_task = ExternalPythonOperator(
+    task_id="run_legacy_code",
+    python_callable=legacy_calculation,
+    python="/opt/venvs/legacy_env/bin/python",  # 사전 구축된 venv
+)
+```
+
+### 어떤 걸 쓸까?
+
+| 방식 | 장점 | 단점 | 적합한 경우 |
+|------|------|------|------------|
+| PythonVirtualenvOperator | 매번 깨끗한 환경 보장 | 실행마다 venv 생성 시간 발생 | requirements가 자주 바뀌는 경우 |
+| ExternalPythonOperator | 실행 오버헤드 없음 | 서버에 venv를 사전 구축/관리 필요 | 안정적인 레거시 환경을 장기 운영 |
+
+**교훈**: `requirements.txt`에 버전을 고정(`==`)하는 것이 중요하다. `pandas>=1.5`처럼 범위 지정을 하면 설치 시점마다 다른 버전이 들어올 수 있고, 그게 바로 "어제까지 됐는데 오늘 안 되는" 상황의 원인이 된다.
+
+> **참고**: [PythonVirtualenvOperator](https://airflow.apache.org/docs/apache-airflow/stable/_api/airflow/operators/python/index.html#airflow.operators.python.PythonVirtualenvOperator), [ExternalPythonOperator](https://airflow.apache.org/docs/apache-airflow/stable/_api/airflow/operators/python/index.html#airflow.operators.python.ExternalPythonOperator)
+
+---
+
+## 2. Retry — 실패는 당연하다
+
+### 외부 시스템에 의존하는 Task는 반드시 실패한다
+
+API Rate Limit, 네트워크 타임아웃, DB 커넥션 풀 소진 — 외부 시스템과 통신하는 Task는 언제든 일시적으로 실패할 수 있다. 중요한 건 **일시적 실패와 영구적 실패를 구분**하는 것이다.
+
+```python
+@task(
+    retries=3,                              # 최대 3회 재시도
+    retry_delay=timedelta(minutes=2),       # 재시도 간격 2분
+    retry_exponential_backoff=True,         # 지수 백오프: 2분 → 4분 → 8분
+    max_retry_delay=timedelta(minutes=30),  # 최대 30분까지
+)
+def call_external_api():
+    response = requests.get("https://api.example.com/data")
+    response.raise_for_status()
+    return response.json()
+```
+
+### retry_delay를 어떻게 설정할까
+
+| 시나리오 | retry_delay | 이유 |
+|---------|-------------|------|
+| API Rate Limit (1분 100회) | 60~120초 | Rate Limit 윈도우가 리셋될 시간 확보 |
+| DB 커넥션 풀 소진 | 30~60초 | 다른 커넥션이 반납될 시간 |
+| 네트워크 일시 장애 | 10~30초 | 짧은 네트워크 끊김은 금방 복구 |
+| 외부 서비스 점검 | 300초 + exponential | 장시간 장애 가능성 대비 |
+
+`retry_exponential_backoff=True`를 설정하면 재시도 간격이 지수적으로 늘어난다. 외부 서비스가 과부하 상태일 때, 고정 간격으로 재시도하면 오히려 부하를 가중시킬 수 있다. 백오프를 적용하면 서비스가 회복할 시간을 준다.
+
+---
+
+## 3. Pool — 동시 실행 수 제한
+
+### 문제: Task를 병렬로 돌리면 외부 시스템이 죽는다
+
+Airflow는 기본적으로 가능한 만큼 Task를 병렬 실행한다. 이게 내부 처리에서는 효율적이지만, **외부 API에 동시 요청을 쏟아부으면** Rate Limit에 걸리거나, 최악의 경우 IP 차단을 당할 수 있다.
+
+### 해결: Pool로 동시 실행 수 제한
+
+[Pool](https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/pools.html)은 동시에 실행될 수 있는 Task 수의 상한선을 설정한다.
+
+```
+Airflow UI → Admin → Pools
+  ┌──────────────────────────────┐
+  │ Pool:         api_pool       │
+  │ Slots:        3              │  ← 동시 최대 3개 Task만 실행
+  │ Running Slots: 2             │
+  │ Queued Slots:  5             │
+  └──────────────────────────────┘
+```
+
+```python
+@task(pool="api_pool")  # 이 Pool의 slot을 사용
+def collect_character_data(character_name: str):
+    response = requests.get(
+        f"https://api.game.com/characters/{character_name}",
+        headers={"Authorization": f"Bearer {API_KEY}"},
+    )
+    return response.json()
+
+# 100명의 캐릭터 데이터를 수집하지만, 동시에 3개씩만 실행
+for name in character_names:
+    collect_character_data(name)
+```
+
+Pool 없이 100개 Task가 동시에 실행되면 API가 순식간에 Rate Limit에 걸린다. Pool을 `3`으로 설정하면 항상 3개씩만 실행되므로 **API 호출 속도를 안전하게 제어**할 수 있다.
+
+### Pool 설정 가이드
+
+| Pool 크기 | 적합한 경우 |
+|-----------|------------|
+| 1 | 순서가 보장되어야 하는 작업 (직렬 실행) |
+| 2~5 | 외부 API Rate Limit이 있는 경우 |
+| 10~20 | DB 커넥션 풀 크기에 맞추는 경우 |
+| 무제한 (기본값) | 외부 의존성 없는 내부 처리 |
+
+> **참고**: [Pools](https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/pools.html)
+
+---
+
+## 4. Callback — 장애 즉시 감지
+
+### 문제: 실패했는데 아무도 모른다
+
+Retry를 3회까지 시도해도 실패하는 경우, 누군가가 Airflow UI를 보고 있지 않는 한 **장애를 인지하지 못한다**. 특히 야간/새벽에 도는 배치 DAG는 다음 날 출근해서야 실패를 발견하는 일이 흔하다.
+
+### 해결: on_failure_callback
+
+[Callback](https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/callbacks.html)은 Task나 DAG의 상태가 변경될 때 자동으로 호출되는 함수다.
+
+```python
+import requests
+from datetime import datetime
+
+def send_slack_alert(context):
+    """Task 실패 시 Slack 알림 전송"""
+    task_instance = context["task_instance"]
+    dag_id = task_instance.dag_id
+    task_id = task_instance.task_id
+    execution_date = context["execution_date"].strftime("%Y-%m-%d %H:%M")
+    log_url = task_instance.log_url
+    exception = context.get("exception", "Unknown")
+
+    message = {
+        "text": (
+            f":rotating_light: *Airflow Task 실패*\n"
+            f"• DAG: `{dag_id}`\n"
+            f"• Task: `{task_id}`\n"
+            f"• 실행 시간: {execution_date}\n"
+            f"• 에러: {str(exception)[:200]}\n"
+            f"• <{log_url}|로그 확인>"
+        )
+    }
+    requests.post(SLACK_WEBHOOK_URL, json=message)
+```
+
+적용 방법은 두 가지다:
+
+```python
+# 방법 1: DAG 레벨 — DAG 내 모든 Task 실패 시 호출
+@dag(
+    dag_id="my_pipeline",
+    default_args={
+        "on_failure_callback": send_slack_alert,
+    },
+    ...
+)
+
+# 방법 2: Task 레벨 — 특정 Task만
+@task(on_failure_callback=send_slack_alert)
+def critical_task():
+    ...
+```
+
+### Callback 종류
+
+| Callback | 호출 시점 | 활용 |
+|----------|----------|------|
+| `on_failure_callback` | Task 실패 (재시도 소진 후) | Slack/이메일 장애 알림 |
+| `on_success_callback` | Task 성공 | 완료 알림, 후처리 트리거 |
+| `on_retry_callback` | Task 재시도 | 재시도 발생 모니터링 |
+| `sla_miss_callback` | SLA 초과 | 처리 시간 이상 감지 |
+
+개인적으로는 `on_failure_callback`을 DAG의 `default_args`에 넣어서 모든 Task에 기본 적용하고, 중요도가 높은 DAG에는 `on_success_callback`도 추가하여 **"정상 완료" 알림까지 받는 패턴**을 선호한다. "알림이 안 왔다 = 아직 돌고 있다"로 판단할 수 있기 때문이다.
+
+> **참고**: [Callbacks](https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/callbacks.html)
+
+---
+
+## 정리
+
+| 패턴 | 해결하는 문제 | 핵심 |
+|------|-------------|------|
+| VirtualEnv 격리 | 라이브러리 버전 충돌 | `requirements.txt` 버전 고정 + Operator로 환경 분리 |
+| Retry + Backoff | 외부 시스템 일시 장애 | exponential backoff로 서비스 회복 시간 확보 |
+| Pool | 동시 요청으로 인한 API 과부하 | 동시 실행 수를 외부 시스템 한계에 맞춤 |
+| Callback | 장애 미인지 | `on_failure_callback`으로 즉각 알림 |
+
+이 세 편의 글에서 다룬 패턴들을 요약하면:
+
+- **[1편 — DAG 구조 설계](/blog/data-engineering/airflow-dag-design-patterns)**: Task 단일 책임, TaskGroup, DAG 간 체이닝
+- **[2편 — Hook과 Sensor](/blog/data-engineering/airflow-hook-sensor-patterns)**: 외부 시스템 연결, 조건 대기, 상태 유지
+- **3편 — 운영 안정성** (이 글): 환경 격리, Retry, Pool, Callback
+
+Airflow를 도입하는 것 자체는 어렵지 않지만, **안정적으로 운영하는 것**은 이런 패턴들이 쌓여야 가능하다. 각 패턴은 독립적으로 적용할 수 있으니, 현재 운영 중인 파이프라인에서 가장 아픈 부분부터 하나씩 적용해보는 걸 추천한다.
+
+---
+
+### 참고 자료
+
+- [PythonVirtualenvOperator](https://airflow.apache.org/docs/apache-airflow/stable/_api/airflow/operators/python/index.html#airflow.operators.python.PythonVirtualenvOperator)
+- [ExternalPythonOperator](https://airflow.apache.org/docs/apache-airflow/stable/_api/airflow/operators/python/index.html#airflow.operators.python.ExternalPythonOperator)
+- [Pools](https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/pools.html)
+- [Callbacks](https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/logging-monitoring/callbacks.html)
+- [Airflow Best Practices](https://airflow.apache.org/docs/apache-airflow/stable/best-practices.html)

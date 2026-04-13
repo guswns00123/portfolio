@@ -1,0 +1,331 @@
+---
+title: "Airflow 실무 운영에서 배운 설계 패턴 (2) — Hook과 Sensor"
+date: "2026-04-13"
+tags: ["airflow", "s3hook", "sensor", "variable", "external-system"]
+category: "data-engineering"
+description: "Airflow에서 S3, 메시지 큐 등 외부 시스템과 연동할 때 사용하는 Hook, Sensor, Variable 패턴을 실무 경험 기반으로 정리합니다."
+---
+
+## 들어가며
+
+Airflow는 데이터 처리 엔진이 아니라 **오케스트레이터**다. 직접 데이터를 가공하기보다는 외부 시스템에 작업을 위임하고, 그 상태를 모니터링하고, 결과를 다음 단계로 넘기는 역할을 한다.
+
+이 글에서는 Airflow가 외부 시스템과 연동될 때 핵심이 되는 세 가지 개념을 다룬다:
+
+- **Hook**: 외부 시스템과의 연결을 추상화
+- **Sensor**: 외부 조건이 충족될 때까지 대기
+- **Variable**: DAG 실행 간 상태를 유지
+
+---
+
+## 1. Hook — 외부 시스템 연결의 추상화
+
+### Hook이란?
+
+[Hook](https://airflow.apache.org/docs/apache-airflow/stable/authoring-and-scheduling/connections.html)은 외부 시스템(DB, 클라우드 스토리지, API 등)과의 연결을 추상화한 인터페이스다. 연결 정보(Connection)를 Airflow UI에서 관리하고, 코드에서는 `conn_id`만 참조하면 된다.
+
+```
+Airflow UI → Admin → Connections
+  ┌─────────────────────────────────┐
+  │ Conn Id:   aws_s3_conn          │
+  │ Conn Type: Amazon Web Services  │
+  │ AWS Access Key: ********        │
+  │ AWS Secret Key: ********        │
+  │ Extra: {"region_name": "ap-.."} │
+  └─────────────────────────────────┘
+```
+
+코드에서는 이렇게 사용한다:
+
+```python
+from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+
+hook = S3Hook(aws_conn_id="aws_s3_conn")
+```
+
+연결 정보가 코드에서 분리되므로, 개발/스테이징/운영 환경별로 `conn_id`만 바꾸면 된다. 환경마다 다른 credential을 코드에 하드코딩할 필요가 없다.
+
+### 실무 사례: Dropbox → S3 마이그레이션
+
+기존에 외부 스토리지(Dropbox)에서 데이터를 가져오는 파이프라인이 있었다. 기존 방식은 이랬다:
+
+```python
+# 기존 방식: 파일을 로컬에 다운로드 → 읽기 → 처리
+@task
+def process_from_dropbox():
+    # 1. Dropbox API로 파일 다운로드
+    dbx = dropbox.Dropbox(access_token)
+    dbx.files_download_to_file("/tmp/data.csv", "/shared/data.csv")
+
+    # 2. 로컬 파일 읽기
+    df = pd.read_csv("/tmp/data.csv")
+
+    # 3. 처리
+    result = transform(df)
+
+    # 4. 로컬 임시 파일 정리
+    os.remove("/tmp/data.csv")
+    return result
+```
+
+이 방식의 문제:
+
+- 로컬 디스크에 임시 파일을 생성하므로 **디스크 용량 관리** 필요
+- Worker가 여러 대일 경우 로컬 파일 경로가 꼬일 수 있음
+- 스토리지 비용 이슈로 S3로 마이그레이션이 필요해졌을 때, 코드 전체를 수정해야 함
+
+S3로 전환하면서 [S3Hook](https://airflow.apache.org/docs/apache-airflow-providers-amazon/stable/_api/airflow/providers/amazon/aws/hooks/s3/index.html)을 도입했다:
+
+```python
+from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+import pandas as pd
+from io import BytesIO
+
+@task
+def process_from_s3():
+    hook = S3Hook(aws_conn_id="aws_s3_conn")
+
+    # S3에서 파일 객체를 직접 읽기 — 로컬 저장 불필요
+    s3_obj = hook.get_key(
+        key="data/raw/daily_data.parquet",
+        bucket_name="my-data-lake"
+    )
+    buffer = BytesIO(s3_obj.get()["Body"].read())
+    df = pd.read_parquet(buffer)
+
+    # 처리
+    result = transform(df)
+    return result
+```
+
+`S3Hook.get_key()`는 S3 객체를 직접 반환하므로 **로컬 파일 시스템을 거치지 않고 메모리에서 바로 읽을 수 있다**. 임시 파일 관리가 필요 없고, Worker 간 파일 충돌 문제도 없다.
+
+### S3Hook의 주요 메서드
+
+| 메서드 | 용도 | 로컬 저장 |
+|--------|------|----------|
+| `read_key(key, bucket)` | 파일 내용을 **문자열**로 반환 | 불필요 |
+| `get_key(key, bucket)` | S3 객체 자체를 반환 (바이너리 처리 가능) | 불필요 |
+| `download_file(key, bucket, local_path)` | 로컬에 파일 다운로드 | 필요 |
+| `load_string(string, key, bucket)` | 문자열을 S3에 업로드 | 불필요 |
+| `load_file(filename, key, bucket)` | 로컬 파일을 S3에 업로드 | 필요 |
+| `check_for_key(key, bucket)` | 파일 존재 여부 확인 | 불필요 |
+
+CSV 같은 텍스트 파일은 `read_key()`로 충분하고, Parquet 같은 바이너리 파일은 `get_key()`로 객체를 가져와서 `BytesIO`로 감싸면 pandas에서 바로 읽을 수 있다.
+
+### Parquet 변환도 함께
+
+S3 마이그레이션과 함께 CSV → Parquet 변환도 진행했다. Parquet은 컬럼 기반 포맷이라 분석 쿼리에서 필요한 컬럼만 읽을 수 있고, 압축률도 높다.
+
+```python
+@task
+def convert_and_upload(df: pd.DataFrame, target_key: str):
+    hook = S3Hook(aws_conn_id="aws_s3_conn")
+    buffer = BytesIO()
+    df.to_parquet(buffer, index=False, engine="pyarrow")
+    buffer.seek(0)
+
+    hook.load_bytes(
+        bytes_data=buffer.getvalue(),
+        key=target_key,
+        bucket_name="my-data-lake",
+        replace=True,
+    )
+```
+
+> **참고**: [S3Hook API Reference](https://airflow.apache.org/docs/apache-airflow-providers-amazon/stable/_api/airflow/providers/amazon/aws/hooks/s3/index.html)
+
+---
+
+## 2. Sensor — 외부 조건 대기
+
+### Sensor란?
+
+[Sensor](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/sensors.html)는 특정 조건이 충족될 때까지 Task 실행을 대기시키는 특수한 Operator다. "S3에 파일이 올라올 때까지 기다려", "큐가 비워질 때까지 기다려" 같은 패턴에 사용한다.
+
+### 핵심 파라미터: mode
+
+Sensor의 동작 방식을 결정하는 가장 중요한 파라미터는 `mode`다:
+
+| mode | 동작 | Worker 점유 | 적합한 경우 |
+|------|------|------------|------------|
+| `poke` (기본값) | Worker slot을 점유한 채 주기적으로 확인 | 점유함 | 수 분 내로 조건 충족 예상 |
+| `reschedule` | 확인 후 조건 미충족이면 **Worker를 반납**하고, 다음 확인 시점에 재스케줄 | 반납함 | 수 시간~수 일 대기 가능 |
+
+`poke` 모드는 Worker slot 하나를 계속 잡고 있기 때문에, 대기 시간이 길어지면 다른 Task가 실행되지 못하는 **Worker 고갈** 문제가 발생한다. 대기 시간이 길 수 있다면 반드시 `reschedule` 모드를 사용해야 한다.
+
+### 실무 사례: 메시지 큐 기반 자동화
+
+외부 수집 서버가 메시지 큐를 통해 데이터를 처리하는 구조가 있었다. 기존에는 운영 담당자가 큐를 **수동으로 모니터링**하다가 메시지가 0건이 되면 다음 작업을 수동으로 실행했다.
+
+이 수동 프로세스를 자동화하기 위해 [PythonSensor](https://airflow.apache.org/docs/apache-airflow/stable/_api/airflow/sensors/python/index.html)를 활용했다:
+
+```python
+from airflow.sensors.python import PythonSensor
+from airflow.decorators import dag, task
+import pendulum
+import requests
+
+def check_queue_empty(**context):
+    """메시지 큐의 메시지 수를 확인하여 0이면 True 반환"""
+    # RabbitMQ Management API로 큐 상태 조회
+    response = requests.get(
+        "http://queue-server:15672/api/queues/%2F/my_queue",
+        auth=("guest", "guest"),
+    )
+    message_count = response.json().get("messages", -1)
+    print(f"현재 큐 메시지 수: {message_count}")
+    return message_count == 0
+
+@dag(
+    dag_id="queue_driven_pipeline",
+    schedule="@daily",
+    start_date=pendulum.datetime(2025, 1, 1, tz="Asia/Seoul"),
+    catchup=False,
+    max_active_runs=1,
+    tags=["sensor", "queue"],
+    default_args={"owner": "data-team"},
+)
+def queue_driven_pipeline():
+
+    wait_for_queue = PythonSensor(
+        task_id="wait_for_queue_empty",
+        python_callable=check_queue_empty,
+        poke_interval=3600,         # 1시간마다 확인
+        timeout=60 * 60 * 24,       # 최대 24시간 대기
+        mode="reschedule",          # Worker 반납
+    )
+
+    @task
+    def process_collected_data():
+        """큐가 비워진 후 수집된 데이터 후처리"""
+        ...
+
+    @task
+    def generate_output():
+        """결과물 생성"""
+        ...
+
+    wait_for_queue >> process_collected_data() >> generate_output()
+
+queue_driven_pipeline()
+```
+
+`mode="reschedule"`로 설정했기 때문에, 큐를 확인하고 메시지가 남아있으면 **Worker를 반납**한다. 1시간 후에 다시 스케줄링되어 확인하고, 메시지가 0이 되면 다음 Task로 넘어간다.
+
+`poke` 모드였다면 최대 24시간 동안 Worker slot 하나를 점유했을 것이다. DAG가 여러 개 돌아가는 환경에서 이는 심각한 리소스 낭비다.
+
+### 자주 쓰이는 Sensor들
+
+| Sensor | 대기 조건 | Provider |
+|--------|----------|----------|
+| `S3KeySensor` | S3에 특정 파일이 존재할 때 | amazon |
+| `ExternalTaskSensor` | 다른 DAG의 특정 Task가 완료될 때 | core |
+| `HttpSensor` | HTTP 엔드포인트가 특정 응답을 반환할 때 | http |
+| `SqlSensor` | SQL 쿼리 결과가 True일 때 | core |
+| `PythonSensor` | Python 함수가 True를 반환할 때 | core |
+| `FileSensor` | 로컬 파일이 존재할 때 | core |
+
+> **참고**: [Sensor Concepts](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/sensors.html)
+
+---
+
+## 3. Variable — DAG 실행 간 상태 유지
+
+### Variable이란?
+
+[Variable](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/variables.html)은 Airflow 메타데이터 DB에 저장되는 key-value 스토어다. DAG 실행이 끝나도 값이 유지되므로, **실행 간 상태를 전달**하는 데 사용할 수 있다.
+
+### 실무 사례: 기준년월 자동 갱신
+
+메시지 큐 기반 파이프라인에서 "이번 달 처리가 끝나면 다음 달로 기준년월을 넘기는" 요구사항이 있었다. DAG가 불규칙적으로 실행되기 때문에(큐가 비워지는 시점에 따라), 고정된 스케줄로는 처리할 수 없었다.
+
+```python
+from airflow.models import Variable
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
+
+@task
+def update_standard_month():
+    """프로세스 완료 시 기준년월을 한 달 증가"""
+    current_month = Variable.get("STANDARD_MONTH", default_var="202412")
+    current_date = datetime.strptime(current_month, "%Y%m")
+    next_date = current_date + relativedelta(months=1)
+    next_month = next_date.strftime("%Y%m")
+
+    Variable.set("STANDARD_MONTH", next_month)
+    print(f"기준년월 갱신: {current_month} → {next_month}")
+
+@task
+def generate_new_targets():
+    """갱신된 기준년월로 신규 대상 목록 생성"""
+    standard_month = Variable.get("STANDARD_MONTH")
+    print(f"기준년월 {standard_month} 기준 대상 목록 생성 시작")
+    ...
+```
+
+```
+[wait_for_queue] → [update_standard_month] → [generate_new_targets] → [push_to_queue]
+     ↑                                                                        │
+     └────────────────── (다음 날 다시 센서 대기) ──────────────────────────────┘
+```
+
+이 구조로 사람의 개입 없이 **수집 완료 감지 → 기준년월 갱신 → 신규 대상 생성 → 큐 전송** 사이클이 자동으로 돌아간다.
+
+### Variable 사용 시 주의점
+
+**DAG 파일의 최상위 스코프에서 `Variable.get()`을 호출하지 말 것.**
+
+```python
+# 안티패턴: DAG 파싱 시마다 DB 쿼리 발생
+STANDARD_MONTH = Variable.get("STANDARD_MONTH")  # DAG 파일 로드 시 매번 실행
+
+@dag(...)
+def my_dag():
+    ...
+```
+
+Airflow Scheduler는 주기적으로 DAG 파일을 파싱한다. 최상위 스코프에 `Variable.get()`이 있으면 **파싱할 때마다 메타데이터 DB에 쿼리**가 발생한다. DAG가 수십 개이고 파싱 주기가 30초라면, DB에 불필요한 부하가 누적된다.
+
+```python
+# 올바른 방식: Task 내부에서 호출
+@task
+def my_task():
+    standard_month = Variable.get("STANDARD_MONTH")  # 실행 시점에만 호출
+    ...
+```
+
+또는 Airflow 2.x의 [Jinja 템플릿](https://airflow.apache.org/docs/apache-airflow/stable/templates-ref.html)으로 접근하면 파싱 시점 문제를 피할 수 있다:
+
+```python
+my_operator = BashOperator(
+    task_id="my_task",
+    bash_command="echo {{ var.value.STANDARD_MONTH }}",
+)
+```
+
+> **참고**: [Variables Best Practices](https://airflow.apache.org/docs/apache-airflow/stable/best-practices.html#airflow-variables)
+
+---
+
+## 정리
+
+| 개념 | 역할 | 핵심 포인트 |
+|------|------|------------|
+| Hook | 외부 시스템 연결 추상화 | 연결 정보를 코드에서 분리. `S3Hook`으로 로컬 저장 없이 직접 읽기/쓰기 |
+| Sensor | 외부 조건 충족 대기 | 대기 시간이 길면 반드시 `mode="reschedule"`. Worker 고갈 방지 |
+| Variable | DAG 간 상태 유지 | 최상위 스코프에서 호출 금지. Task 내부 또는 Jinja 템플릿 사용 |
+
+Airflow의 강점은 데이터를 직접 처리하는 것이 아니라, **외부 시스템의 작업을 조율하는 것**이다. Hook과 Sensor를 적절히 활용하면, Airflow는 가볍게 유지하면서도 복잡한 외부 시스템 의존성을 안정적으로 관리할 수 있다.
+
+다음 글에서는 파이프라인의 운영 안정성을 높이는 패턴 — **환경 격리, Retry, Callback, Pool**을 다룬다.
+
+---
+
+### 참고 자료
+
+- [Airflow Connections & Hooks](https://airflow.apache.org/docs/apache-airflow/stable/authoring-and-scheduling/connections.html)
+- [S3Hook API Reference](https://airflow.apache.org/docs/apache-airflow-providers-amazon/stable/_api/airflow/providers/amazon/aws/hooks/s3/index.html)
+- [Sensor Concepts](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/sensors.html)
+- [Variables](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/variables.html)
+- [Best Practices — Variables](https://airflow.apache.org/docs/apache-airflow/stable/best-practices.html#airflow-variables)
