@@ -2,10 +2,13 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useSession } from "next-auth/react";
 import { cn } from "@/lib/utils";
 import LoginButton from "@/components/auth/LoginButton";
 
-const navItems = [
+const publicNavItems = [{ href: "/portfolio", label: "Portfolio" }];
+
+const adminNavItems = [
   { href: "/", label: "Home" },
   { href: "/blog", label: "Blog" },
   { href: "/portfolio", label: "Portfolio" },
@@ -13,11 +16,14 @@ const navItems = [
 
 export default function Header() {
   const pathname = usePathname();
+  const { data: session } = useSession();
+
+  const navItems = session?.user ? adminNavItems : publicNavItems;
 
   return (
     <header className="sticky top-0 z-40 border-b bg-background/80 backdrop-blur-sm">
       <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-6">
-        <Link href="/" className="text-lg font-bold tracking-tight">
+        <Link href={session?.user ? "/" : "/portfolio"} className="text-lg font-bold tracking-tight">
           DE Portfolio
         </Link>
         <nav className="flex items-center gap-6">
