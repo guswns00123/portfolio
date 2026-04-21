@@ -1,0 +1,336 @@
+---
+title: "PostgreSQL 파티셔닝 실전: Declarative Partitioning과 Partition Pruning"
+date: "2026-04-21"
+category: "data-engineering"
+description: "Range, List, Hash 파티셔닝의 선택 기준, Partition Pruning이 실제로 동작하는 조건, 운영 중 파티션 추가/삭제 패턴, 그리고 파티셔닝이 오히려 손해인 경우를 정리합니다."
+tags: ["postgresql", "partitioning", "partition-pruning", "query-optimization"]
+---
+
+
+## 들어가며
+
+수백만~수억 건 규모의 테이블에서 파티셔닝은 관리와 성능 양쪽에서 큰 차이를 만든다. 잘 쓰면 쿼리가 수배 빨라지고, 오래된 데이터 삭제도 `DROP PARTITION`으로 한 번에 끝난다. 하지만 잘못 설계하면 쿼리가 모든 파티션을 스캔해서 오히려 느려진다.
+
+이 글은 PostgreSQL 10 이후의 **Declarative Partitioning**을 기준으로, 파티셔닝 방식 선택 기준, **Partition Pruning**이 실제로 작동하는 조건, 운영 패턴, 그리고 "파티셔닝이 도움이 안 되는 경우"를 정리한다.
+
+---
+
+## 왜 파티셔닝을 쓰는가
+
+파티셔닝의 이익은 크게 네 가지다.
+
+### 1. Partition Pruning으로 I/O 절감
+
+쿼리 조건에 파티션 키가 포함되면, Planner는 관련 없는 파티션을 실행 대상에서 제거한다. 10년치 월별 파티션에서 `WHERE created_at BETWEEN '2026-04-01' AND '2026-04-30'`을 실행하면 120개 파티션 중 1개만 읽으면 된다.
+
+### 2. 인덱스 크기 축소
+
+파티션마다 별도 인덱스가 생긴다. 전체 데이터 기준의 거대한 B-tree 하나보다, 각 파티션별 작은 B-tree가 메모리에 올리기 쉽고 유지보수도 간단하다.
+
+### 3. 빠른 대용량 삭제
+
+시간 경과된 데이터를 지울 때 `DELETE`는 매우 비싸다(Dead Tuple, WAL, 인덱스 갱신). 파티션이면 `DROP TABLE` 한 번으로 끝난다. 수억 건 삭제가 수십 초 만에 완료된다.
+
+### 4. 분리된 통계와 VACUUM
+
+파티션별로 `ANALYZE` 통계가 따로 쌓이고, `VACUUM`도 별도 실행된다. 특정 파티션에만 쓰기가 집중되는 워크로드에서 전체 테이블을 건드리지 않고 해당 파티션만 처리할 수 있다.
+
+---
+
+## 파티셔닝 방식: Range, List, Hash
+
+PostgreSQL은 세 가지 방식을 지원한다.
+
+### Range Partitioning
+
+**연속된 범위**로 데이터를 나눈다. 시간 기반 분할에서 가장 자주 쓰인다.
+
+```sql
+CREATE TABLE orders (
+    id         BIGSERIAL,
+    user_id    BIGINT,
+    amount     NUMERIC,
+    created_at TIMESTAMP NOT NULL
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE orders_2026_04 PARTITION OF orders
+    FOR VALUES FROM ('2026-04-01') TO ('2026-05-01');
+
+CREATE TABLE orders_2026_05 PARTITION OF orders
+    FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
+```
+
+각 파티션은 **시작 포함, 끝 제외** 반열린 구간이다.
+
+### List Partitioning
+
+**미리 정해진 값 집합**으로 나눈다. 지역 코드, 카테고리 등 카디널리티가 적고 값이 고정된 컬럼에 쓴다.
+
+```sql
+CREATE TABLE sales (
+    region_code TEXT NOT NULL,
+    amount      NUMERIC
+) PARTITION BY LIST (region_code);
+
+CREATE TABLE sales_kr PARTITION OF sales FOR VALUES IN ('KR');
+CREATE TABLE sales_us PARTITION OF sales FOR VALUES IN ('US');
+CREATE TABLE sales_eu PARTITION OF sales FOR VALUES IN ('EU', 'UK');
+```
+
+### Hash Partitioning
+
+**키의 해시값**으로 나눈다. 값 분포가 균일하지 않거나 범위/리스트로 자연스럽게 나누기 어려운 경우 쓴다.
+
+```sql
+CREATE TABLE events (
+    user_id BIGINT NOT NULL,
+    payload JSONB
+) PARTITION BY HASH (user_id);
+
+CREATE TABLE events_p0 PARTITION OF events FOR VALUES WITH (modulus 4, remainder 0);
+CREATE TABLE events_p1 PARTITION OF events FOR VALUES WITH (modulus 4, remainder 1);
+CREATE TABLE events_p2 PARTITION OF events FOR VALUES WITH (modulus 4, remainder 2);
+CREATE TABLE events_p3 PARTITION OF events FOR VALUES WITH (modulus 4, remainder 3);
+```
+
+Hash는 **데이터가 균등하게 나뉘는 장점**이 있지만, **시간 기반 삭제나 범위 쿼리의 Pruning 효과가 없다**. 주로 쓰기 부하를 분산하고 싶을 때 선택한다.
+
+### 선택 기준
+
+| 상황 | 권장 방식 |
+|------|---------|
+| 시간 경과 데이터 삭제가 중요 | Range (시간) |
+| 쿼리가 주로 특정 기간 대상 | Range (시간) |
+| 지역/카테고리 등 고정 값으로 분리 | List |
+| 값 분포가 한쪽에 치우침, 삭제보다 부하 분산이 목적 | Hash |
+| 시간 + 지역처럼 두 축이 모두 중요 | Range + List (Sub-partitioning) |
+
+---
+
+## Partition Pruning — 언제 실제로 동작하는가
+
+Partition Pruning은 파티셔닝의 핵심 이익이지만, **모든 쿼리에서 자동으로 되는 건 아니다**.
+
+### Pruning이 동작하는 조건
+
+1. **쿼리 조건에 파티션 키가 등장**해야 한다.
+2. 조건의 **값이 Planner 단계에서 평가 가능**해야 한다 (상수, 파라미터 등).
+3. 버전이 PostgreSQL 11 이상이어야 실행 시 Pruning이 제대로 동작한다 (10에서는 계획 단계만).
+
+### Pruning이 안 되는 대표 케이스
+
+#### 1. 파티션 키에 함수를 씌울 때
+
+```sql
+-- 나쁨: 인덱스도 인덱스 스캔도 안 되고 Pruning도 안 된다
+SELECT * FROM orders WHERE DATE(created_at) = '2026-04-15';
+
+-- 좋음
+SELECT * FROM orders
+WHERE created_at >= '2026-04-15' AND created_at < '2026-04-16';
+```
+
+`DATE()`가 모든 행에 적용돼야 하므로 어느 파티션을 제외할지 판단 불가.
+
+#### 2. 타입 불일치
+
+```sql
+-- created_at이 TIMESTAMP인데 TEXT로 비교
+SELECT * FROM orders WHERE created_at = '2026-04-15';
+```
+
+PostgreSQL이 자동 캐스팅하지만, 캐스팅 방향에 따라 Pruning이 깨질 수 있다. **파티션 키와 정확히 같은 타입**의 리터럴을 쓰는 것이 안전하다.
+
+#### 3. 파티션 키 없이 조회
+
+```sql
+SELECT * FROM orders WHERE user_id = 12345;
+```
+
+`user_id`가 파티션 키가 아니면 모든 파티션을 스캔한다. Pruning 효과가 없다.
+
+### 확인 방법
+
+`EXPLAIN`으로 실행 계획을 보면 된다.
+
+```sql
+EXPLAIN
+SELECT * FROM orders
+WHERE created_at BETWEEN '2026-04-01' AND '2026-04-30';
+```
+
+실제 스캔하는 파티션만 나오면 Pruning이 동작한 것이다. 모든 파티션이 나오면 실패.
+
+PostgreSQL 12 이상에서는 `EXPLAIN (ANALYZE)` 결과에 "Subplans Removed: N" 같은 정보가 함께 나온다.
+
+---
+
+## 실행 시 Pruning (Runtime Pruning)
+
+PostgreSQL 11부터는 **실행 시점에 결정되는 값**도 Pruning에 활용할 수 있다.
+
+```sql
+PREPARE q (timestamp) AS
+    SELECT * FROM orders WHERE created_at = $1;
+
+EXECUTE q ('2026-04-15');
+```
+
+Prepared Statement의 파라미터 값은 Planner 단계에서 모르지만, Executor가 실제 값을 안 이후에 Pruning을 수행한다.
+
+JOIN 조건에서도 비슷하다.
+
+```sql
+SELECT *
+FROM dim_date d
+JOIN orders o ON o.created_at = d.day
+WHERE d.is_holiday = true;
+```
+
+`d.day`의 값들은 실행 중에 결정되지만, 해당 파티션만 스캔하도록 최적화된다. (단, Partition-wise Join 옵션이 켜져 있어야 완전히 활용됨 — 아래 참고.)
+
+---
+
+## 운영 패턴
+
+### 파티션 미리 만들기
+
+시간 파티션을 운영할 때 **다음 달 파티션을 미리 만들어 두는** 루틴이 필요하다. 없으면 해당 기간 데이터 INSERT가 실패한다.
+
+```sql
+-- 매달 말일에 실행
+CREATE TABLE orders_2026_05 PARTITION OF orders
+    FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
+```
+
+`pg_partman` 같은 확장은 이 루틴을 자동화해 준다.
+
+### DEFAULT 파티션의 함정
+
+```sql
+CREATE TABLE orders_default PARTITION OF orders DEFAULT;
+```
+
+DEFAULT 파티션은 **어떤 파티션에도 해당하지 않는 행**을 받아낸다. 안전망처럼 보이지만 치명적 단점이 있다.
+
+- DEFAULT에 데이터가 한 번이라도 들어가면, **새 파티션을 붙일 때 해당 파티션 범위에 맞는 DEFAULT 내 데이터를 검사해야 한다**. 큰 테이블에서는 이 검사가 매우 느리다.
+- Partition Pruning이 DEFAULT 파티션에 대해서는 제한적이다.
+
+**가능하면 DEFAULT 파티션을 만들지 말고**, 상위 로직에서 파티션 범위를 관리하는 편이 낫다.
+
+### 파티션 스왑 (Partition Exchange)
+
+운영 테이블에 대량 데이터를 적재할 때 쓰는 패턴.
+
+```sql
+-- 1. 별도 테이블에 조용히 적재
+CREATE TABLE orders_2026_05_new (LIKE orders INCLUDING ALL);
+COPY orders_2026_05_new FROM '...';
+CREATE INDEX ... ON orders_2026_05_new (...);
+ANALYZE orders_2026_05_new;
+
+-- 2. 준비된 테이블을 파티션으로 연결
+ALTER TABLE orders ATTACH PARTITION orders_2026_05_new
+    FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
+```
+
+적재 중 운영 테이블에 거의 부하를 주지 않고, 마지막 ATTACH만 잠깐의 메타데이터 변경으로 끝난다.
+
+### 오래된 파티션 제거
+
+```sql
+-- 10분 이내에 끝남
+DROP TABLE orders_2025_04;
+
+-- 파티션만 떼어내고 테이블은 보존 (아카이브용)
+ALTER TABLE orders DETACH PARTITION orders_2025_04;
+```
+
+DETACH는 테이블을 파티션에서 분리만 하므로 데이터는 남는다. 이후 dump해서 아카이브 스토리지로 옮기고 나서 DROP한다.
+
+---
+
+## 인덱스 설계
+
+파티션 테이블에서 인덱스는 각 파티션에 독립적으로 만들어진다. PostgreSQL 11 이후로 **파티션 루트에 인덱스를 정의하면 모든 파티션에 자동 전파**된다.
+
+```sql
+CREATE INDEX ON orders (user_id);
+-- 모든 기존/미래 파티션에 user_id 인덱스 생성
+```
+
+### 파티션 키 자체의 인덱스
+
+파티션 키 컬럼(`created_at`)에 별도 인덱스가 필요한가? 대부분은 아니다. Pruning이 파티션 단위로 범위를 좁혀 주기 때문이다. 단, **한 파티션 내에서 좁은 시간 범위로 필터링**하는 쿼리가 많으면 파티션 내 인덱스가 유용하다.
+
+### UNIQUE 제약
+
+파티션 테이블의 UNIQUE 제약은 **파티션 키를 포함**해야만 만들 수 있다. 이건 PostgreSQL 구현 제한이다.
+
+```sql
+-- 불가능
+CREATE TABLE orders (id BIGINT UNIQUE, ...) PARTITION BY RANGE (created_at);
+
+-- 가능 (파티션 키 포함)
+CREATE TABLE orders (
+    id BIGINT,
+    created_at TIMESTAMP NOT NULL,
+    UNIQUE (id, created_at)
+) PARTITION BY RANGE (created_at);
+```
+
+전역 UNIQUE가 필요하다면 파티셔닝을 포기하거나, 애플리케이션 로직에서 ID 생성을 제어해야 한다.
+
+---
+
+## Partition-wise Join과 Aggregate
+
+파티션된 두 테이블을 같은 파티션 키로 JOIN할 때, PostgreSQL은 파티션별로 JOIN을 병렬 수행할 수 있다. 이를 **Partition-wise Join**이라 한다.
+
+```sql
+SET enable_partitionwise_join = on;
+SET enable_partitionwise_aggregate = on;
+```
+
+기본값은 off다. 분석 쿼리 위주 환경이면 켜는 게 유리하다. OLTP 환경에서는 Planner 비용이 커져서 오히려 손해일 수 있어 기본값을 유지한다.
+
+---
+
+## 파티셔닝이 오히려 손해인 경우
+
+파티셔닝은 공짜가 아니다. 다음 상황에서는 파티셔닝이 이득이 없거나 오히려 손해다.
+
+### 1. 데이터 규모가 작을 때
+
+행이 수백만 건 이하라면 인덱스 스캔만으로도 충분히 빠르다. 파티셔닝의 관리 오버헤드만 생긴다.
+
+### 2. 쿼리가 파티션 키를 안 쓸 때
+
+쿼리가 주로 `user_id`로 필터링하는데 파티션을 `created_at`으로 했다면, 모든 파티션을 스캔한다. Pruning 이익 없이 파티션 수만큼의 인덱스 탐색 비용이 추가된다.
+
+### 3. 파티션 개수가 너무 많을 때
+
+파티션 수가 수천 개로 늘어나면 Planner가 파티션 목록을 다루는 데 시간이 걸린다. 일반적으로 **수십~수백 개**가 관리 가능한 범위. 일 단위 파티션을 10년치 만들면 3,650개인데, 이 정도면 월 단위로 재설계하는 게 낫다.
+
+### 4. 쓰기가 한 파티션에 몰릴 때
+
+시간 기반 파티션에서 "현재 월 파티션"에만 INSERT가 집중된다. 이 경우 단일 테이블과 성능 차이가 별로 없다. Hash Partitioning이 이때 유리하다.
+
+---
+
+## 요약
+
+- 파티셔닝의 주 이익은 **Partition Pruning, 인덱스 축소, 빠른 대량 삭제, 파티션별 통계**다.
+- Range는 시간, List는 고정 값, Hash는 분포 균형. 선택은 **삭제 전략과 쿼리 패턴**으로 결정.
+- Pruning은 **쿼리 조건에 파티션 키가 명시**되고 **값이 Planner에 보여야** 동작. 함수 적용이나 타입 불일치는 Pruning을 깨뜨린다.
+- 운영에서는 **파티션 사전 생성, Partition Exchange 패턴, DETACH 후 아카이브**가 핵심 패턴.
+- UNIQUE 제약은 **파티션 키를 포함**해야 가능. 전역 UNIQUE는 구현 제약.
+- 데이터가 작거나 쿼리가 파티션 키를 안 쓰면 파티셔닝은 손해다. 파티션 수도 **수십~수백 개**를 넘지 않게 설계.
+- Partition-wise Join/Aggregate는 분석 환경에서만 켤 것.
+
+## 참고
+
+- [PostgreSQL Documentation — Table Partitioning](https://www.postgresql.org/docs/current/ddl-partitioning.html)
+- [PostgreSQL Documentation — Partition Pruning](https://www.postgresql.org/docs/current/ddl-partitioning.html#DDL-PARTITION-PRUNING)
+- [PostgreSQL Documentation — Runtime Configuration (enable_partitionwise_*)](https://www.postgresql.org/docs/current/runtime-config-query.html)
+- [pg_partman — Partition Management Extension](https://github.com/pgpartman/pg_partman)

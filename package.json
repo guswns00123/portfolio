@@ -20,6 +20,7 @@
     "next": "16.2.2",
     "next-auth": "^5.0.0-beta.30",
     "next-mdx-remote": "^6.0.0",
+    "ollama": "^0.6.3",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "rehype-pretty-code": "^0.14.3",

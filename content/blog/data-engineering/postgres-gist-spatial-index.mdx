@@ -1,0 +1,232 @@
+---
+title: "PostgreSQL 공간 인덱스: GIST와 R-tree 원리"
+date: "2026-04-20"
+category: "data-engineering"
+description: "B-tree가 공간 데이터에 통하지 않는 이유, R-tree 구조, GIST가 어떻게 R-tree를 일반화했는지, PostGIS 연산자와 인덱스 사용 조건을 정리합니다."
+tags: ["postgresql", "postgis", "gist", "r-tree", "spatial-index", "geometry"]
+---
+
+
+## 들어가며
+
+공간 데이터(위경도, 도형, 폴리곤)를 다루는 쿼리에서 일반적인 B-tree 인덱스는 거의 도움이 되지 않는다. 대신 **GIST** 인덱스를 쓴다. 그런데 GIST는 무엇이고, 왜 공간 데이터에 특별히 맞는가?
+
+이 글은 B-tree가 다차원 데이터에 한계를 갖는 이유에서 출발해, R-tree 구조의 핵심, GIST가 R-tree를 어떻게 일반화했는지, 그리고 PostGIS 연산자와 인덱스 사용 조건을 정리한다.
+
+---
+
+## B-tree는 왜 공간 데이터에 안 맞는가
+
+B-tree는 **한 방향으로 정렬 가능한 1차원 키**에 최적화된 자료구조다. 숫자, 문자열, 날짜는 모두 `<`, `>`, `=` 관계가 명확하게 정의되는 1차원 값이다.
+
+하지만 2차원 좌표는 그렇지 않다. `(3, 7)`과 `(5, 2)` 중 어느 쪽이 더 "크다"고 말할 수 있는가? 정답은 **"그런 비교 자체가 없다"**다.
+
+B-tree로 좌표를 다루려고 x, y 각각에 인덱스를 만드는 방법이 있지만, `WHERE x BETWEEN 0 AND 10 AND y BETWEEN 0 AND 10` 같은 박스 쿼리에서 두 인덱스를 결합해도 원하는 성능이 안 나온다. **"두 차원이 동시에 가까운 점"**이라는 개념을 B-tree로 표현할 수 없기 때문이다.
+
+공간 쿼리의 핵심 연산은 다음과 같다.
+
+- **포함(containment)**: 이 영역에 들어오는 점은?
+- **겹침(intersection)**: 이 도형과 겹치는 도형은?
+- **근접(nearest)**: 이 점에서 가장 가까운 5개는?
+
+세 연산 모두 1차원 정렬만으로는 효율화되지 않는다. 다차원 공간을 다루는 별도의 자료구조가 필요하다.
+
+---
+
+## R-tree: 박스를 계층적으로 감싸는 나무
+
+**R-tree**는 1984년 Antonin Guttman이 제안한 공간 인덱스 구조다. 이름의 R은 Rectangle에서 왔다.
+
+### 핵심 아이디어: MBR (Minimum Bounding Rectangle)
+
+모든 도형(점, 선, 폴리곤)은 **자신을 감싸는 최소 직사각형**으로 근사할 수 있다. 이 직사각형을 MBR이라 한다.
+
+R-tree는 도형 자체가 아니라 **MBR끼리의 포함/겹침 관계**로 트리를 구성한다. 리프 노드에는 실제 도형의 MBR이, 내부 노드에는 자식들의 MBR 전체를 감싸는 더 큰 MBR이 저장된다.
+
+```
+           [큰 MBR (전체를 감쌈)]
+          /                  \
+    [MBR A 영역]         [MBR B 영역]
+     /      \             /      \
+  [점1] [폴리곤2]    [선3]  [폴리곤4]
+```
+
+### 검색 원리
+
+"점 P를 포함하는 도형을 찾아라" 쿼리는 이렇게 진행된다.
+
+1. 루트 노드의 MBR에 P가 들어 있나? → 들어오면 자식 노드로 내려간다.
+2. 자식들 중 MBR에 P를 포함하는 것들만 따라 내려간다.
+3. 리프에 도달하면 실제 도형을 검사한다.
+
+**관련 없는 가지는 MBR 단계에서 아예 제거**되므로 탐색 비용이 크게 줄어든다. 평균 `O(log N)` 성능이 나오는 이유다.
+
+### B-tree와의 결정적 차이
+
+B-tree는 **형제 노드끼리 영역이 겹치지 않는다**. 한 노드의 범위는 엄밀히 분리돼 있다.
+
+R-tree는 **형제 노드끼리 영역이 겹칠 수 있다**. 두 MBR이 겹치는 공간에 놓인 점은 두 가지를 모두 탐색해야 한다. 이게 R-tree의 성능이 삽입 순서와 분할 전략에 민감한 이유다.
+
+---
+
+## GIST: R-tree를 일반화한 인덱스 프레임워크
+
+PostgreSQL의 **GIST(Generalized Search Tree)**는 R-tree를 포함하는 더 큰 개념이다. "Generalized"라는 이름대로, R-tree의 기본 구조(트리 + 박스 요약 + 겹침 허용)를 추상화해서, **임의의 자료형에 적용 가능한 인덱스 프레임워크**로 만들었다.
+
+개발자가 몇 가지 함수를 구현하면 같은 트리 구조를 새로운 자료형에 적용할 수 있다.
+
+- `consistent`: "이 노드의 요약값이 쿼리와 일치할 수 있나?"
+- `union`: "이 자식들을 감싸는 요약값을 만들어라"
+- `compress` / `decompress`: "요약값을 저장용으로 압축/해제하라"
+- `penalty`: "새 값을 어느 자식에 넣을 때 비용이 가장 적나?"
+- `picksplit`: "노드가 가득 찼을 때 어떻게 둘로 나누나?"
+
+### GIST가 지원하는 자료형
+
+이 일반화 덕분에 GIST는 공간 데이터 외에도 다양한 자료형에 쓰인다.
+
+- **공간 데이터** (PostGIS의 `geometry`, `geography`): R-tree로 동작
+- **범위 타입** (`int4range`, `tsrange`): 범위 겹침 인덱스
+- **전문 검색** (`tsvector`): 단어 집합 겹침 인덱스
+- **배열** (`intarray`): 배열 원소 겹침 인덱스
+- **하이퍼볼릭 거리** (pgvector의 일부 모드): 벡터 유사도
+
+즉 GIST는 "공간용"이 아니라 "**겹침·포함 연산에 최적화된 일반 인덱스 구조**"다. 공간 데이터가 가장 유명한 응용일 뿐이다.
+
+---
+
+## PostGIS 연산자와 인덱스 사용 조건
+
+PostGIS에서 인덱스를 타는 연산자는 정해져 있다. 잘못된 연산자를 쓰면 GIST가 있어도 Seq Scan으로 떨어진다.
+
+### 인덱스를 타는 대표 연산자
+
+| 연산자 | 의미 |
+|-------|------|
+| `&&` | MBR이 겹친다 |
+| `@>` | 왼쪽이 오른쪽을 포함한다 (MBR 기준) |
+| `<@` | 왼쪽이 오른쪽에 포함된다 (MBR 기준) |
+| `~=` | MBR이 같다 |
+
+이 연산자들은 **MBR 기반의 근사 판정**이다. 즉 인덱스가 반환한 결과가 "정확한 답"은 아니고, "후보 집합"이다.
+
+### 자주 쓰는 함수와 인덱스 타는 방식
+
+`ST_Intersects`, `ST_Contains`, `ST_Within` 같은 PostGIS 함수는 내부적으로 **MBR 체크(`&&`) → 정확한 기하 계산**의 두 단계로 나뉜다. 쿼리 플래너는 이걸 알고 있어서, 함수를 쓴 쿼리도 자동으로 인덱스를 활용한다.
+
+```sql
+-- 아래 쿼리는 자동으로 GIST 인덱스를 탄다
+SELECT *
+FROM regions
+WHERE ST_Contains(geom, ST_MakePoint(127.0, 37.5));
+```
+
+내부적으로는 이런 실행 흐름이다.
+
+```
+GIST Index Scan  (MBR 기반 후보 추출)
+  → Filter: ST_Contains(...)  (실제 기하 판정)
+```
+
+### 거리 기반 쿼리: `ST_DWithin`
+
+"반경 1km 이내"는 `ST_Distance <= 1000`으로도 쓸 수 있지만 이 쿼리는 **인덱스를 못 탄다**. Distance 계산이 함수 결과이기 때문이다.
+
+`ST_DWithin`을 쓰면 PostGIS가 내부적으로 "중심점 주변의 검색 박스"를 만들어 GIST 인덱스로 후보를 좁힌다.
+
+```sql
+-- 인덱스 타지 않음
+SELECT * FROM places WHERE ST_Distance(geom, target) <= 1000;
+
+-- 인덱스 탄다
+SELECT * FROM places WHERE ST_DWithin(geom, target, 1000);
+```
+
+거리 쿼리에서는 **항상 `ST_DWithin`을 우선 고려**한다.
+
+### 최근접 이웃: KNN 연산자 `<->`
+
+"가장 가까운 10곳"은 정렬 + 거리 계산이 필요한데, 이 경우 KNN-GIST가 활용된다.
+
+```sql
+SELECT id, geom <-> target AS distance
+FROM places
+ORDER BY geom <-> target
+LIMIT 10;
+```
+
+`<->` 연산자가 GIST 인덱스를 거리 순으로 순회할 수 있게 해 준다. 정렬과 Limit을 인덱스 탐색 자체에서 처리하므로 매우 빠르다.
+
+---
+
+## 인덱스 생성과 유지
+
+### 생성 구문
+
+```sql
+CREATE INDEX idx_regions_geom ON regions USING GIST (geom);
+```
+
+`USING GIST`를 명시해야 한다. 기본값은 B-tree이므로 생략하면 공간 타입에 대해서는 에러가 나거나 쓸모없는 인덱스가 만들어진다.
+
+### geometry vs geography
+
+두 타입이 비슷해 보이지만 인덱스 거동이 다르다.
+
+- `geometry`: 평면 좌표로 취급. 계산이 빠르지만 거리 단위가 좌표계에 의존.
+- `geography`: 지구 타원체 기반. 계산이 느리지만 항상 미터 단위.
+
+분석 대상이 **전 세계 범위거나 실제 거리**가 필요하면 `geography`가 맞다. **같은 좌표계 내의 제한된 지역**이고 성능이 중요하면 `geometry`가 낫다.
+
+### VACUUM과 통계
+
+공간 인덱스도 일반 인덱스처럼 Bloat가 생긴다. 대량 INSERT/UPDATE 이후 `VACUUM ANALYZE`를 돌리는 습관이 필요하다. `ANALYZE`는 특히 중요한데, Planner가 공간 조건의 선택도를 추정하는 기반 통계이기 때문이다.
+
+---
+
+## GIST vs SP-GIST vs BRIN — 공간 인덱스의 다른 선택지
+
+공간 데이터에 쓸 수 있는 인덱스가 GIST만 있는 건 아니다.
+
+### SP-GIST (Space-Partitioned GIST)
+
+**겹치지 않는 공간 분할**에 기반한 인덱스. Quadtree, K-D tree 등의 구조를 구현한다. R-tree와 달리 형제 영역이 겹치지 않아서, 특정 분포(예: 점 데이터가 골고루 퍼져 있음)에서 더 효율적일 수 있다.
+
+데이터가 점 중심이고 고르게 분포돼 있으면 SP-GIST가 빠르다. 폴리곤처럼 크기가 제각각인 도형이 많으면 GIST가 낫다.
+
+### BRIN (Block Range Index)
+
+**데이터가 물리적 저장 순서와 상관관계가 높을 때** 효율적인 인덱스. 공간 데이터 자체에 직접 쓰기보다는, "시간이 지남에 따라 순차 적재되는" 로그성 공간 데이터에 적합하다.
+
+크기가 매우 작고(메가바이트 단위), 거대한 테이블에서도 부담 없지만, **정확도는 낮다**. 후보 범위가 크게 잡혀서 Filter가 많이 든다. 스토리지가 아까운 대용량 아카이브 테이블에서 고려할 만하다.
+
+---
+
+## 실전 체크리스트
+
+- 공간 컬럼에는 **반드시 `USING GIST`**로 인덱스를 만든다.
+- 거리 쿼리는 `ST_Distance <= N` 대신 **`ST_DWithin`**을 쓴다.
+- 최근접 N개는 **`<->` 연산자**와 `ORDER BY ... LIMIT`을 활용한다.
+- 데이터가 점 중심이고 균일 분포면 **SP-GIST**도 검토.
+- 대규모 순차 적재 로그성 공간 데이터는 **BRIN** 검토.
+- 대량 적재 후 **`VACUUM ANALYZE`**로 Bloat 정리와 통계 갱신.
+- `EXPLAIN (ANALYZE, BUFFERS)`로 **Index Scan이 정말 일어났는지** 반드시 확인.
+
+---
+
+## 요약
+
+- B-tree는 1차원 정렬에 기반하므로 공간 데이터에 적합하지 않다.
+- R-tree는 MBR로 도형을 감싸고, MBR끼리의 계층적 트리를 구축해 공간 검색을 `O(log N)`에 가깝게 만든다.
+- GIST는 R-tree의 아이디어를 일반화한 **인덱스 프레임워크**다. 공간·범위·전문검색·배열 등 다양한 자료형에 적용된다.
+- PostGIS 연산자 중 `&&`, `@>`, `<@`, `~=`가 GIST 인덱스를 직접 탄다. 고수준 함수(`ST_Contains`, `ST_Intersects`)도 내부적으로 MBR 체크 단계에서 인덱스를 활용한다.
+- 거리 조건은 `ST_DWithin`, 최근접은 `<->` 연산자. 단순 `ST_Distance` 비교는 인덱스를 못 탄다.
+- 데이터 특성에 따라 SP-GIST나 BRIN이 더 적합할 수 있다.
+
+## 참고
+
+- [PostgreSQL Documentation — GIST Indexes](https://www.postgresql.org/docs/current/gist.html)
+- [PostgreSQL Documentation — SP-GIST Indexes](https://www.postgresql.org/docs/current/spgist.html)
+- [PostGIS Documentation — Spatial Indexes](https://postgis.net/workshops/postgis-intro/indexing.html)
+- [PostGIS Documentation — ST_DWithin](https://postgis.net/docs/ST_DWithin.html)
+- [Guttman, A. (1984). "R-trees: a dynamic index structure for spatial searching"](https://dl.acm.org/doi/10.1145/602259.602266)

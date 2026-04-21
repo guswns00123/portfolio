@@ -1,0 +1,272 @@
+---
+title: "PostgreSQL 대용량 적재: INSERT, COPY, UNLOGGED의 WAL 관점 비교"
+date: "2026-04-18"
+category: "data-engineering"
+description: "수백만 건 규모의 데이터 적재에서 INSERT, COPY, UNLOGGED 테이블의 성능 차이가 나는 근본 이유를 WAL, fsync, 트랜잭션 경계 관점에서 분석합니다."
+tags: ["postgresql", "bulk-load", "wal", "copy", "performance", "fsync"]
+---
+
+
+## 들어가며
+
+수백만, 수천만 건 규모의 데이터를 PostgreSQL에 넣을 때 **어떤 방식을 쓰느냐에 따라 적재 시간이 10배 이상 차이**가 난다. 같은 데이터를 같은 테이블에 넣는데도 말이다.
+
+이 차이는 SQL 문법이 아니라 **WAL(Write-Ahead Log)과 트랜잭션 경계**에서 비롯된다. 이 글은 INSERT, COPY, UNLOGGED 테이블, 그리고 그 너머의 최적화 기법이 각각 어떤 비용 구조를 갖는지, 왜 그 차이가 나는지를 정리한다.
+
+---
+
+## WAL과 fsync — 모든 쓰기가 디스크로 가는 경로
+
+PostgreSQL은 데이터 블록을 직접 고쳐 디스크에 쓰지 않는다. 모든 변경은 먼저 **WAL(Write-Ahead Log)**이라는 로그 파일에 기록된다. WAL의 목적은 두 가지다.
+
+- **Durability**: 커밋된 트랜잭션은 장애 후에도 복구 가능
+- **Crash Recovery**: 비정상 종료 시 마지막 일관된 상태로 재구성
+
+일반적인 쓰기 경로는 다음과 같다.
+
+```
+변경 발생
+  ↓
+WAL 버퍼에 기록
+  ↓
+커밋 시점에 WAL을 디스크로 flush (fsync)
+  ↓
+나중에 Checkpoint가 실제 데이터 페이지를 디스크로 flush
+```
+
+이 경로에서 가장 비싼 단계가 **커밋 시점의 fsync**다. fsync는 OS 페이지 캐시에 있는 WAL을 실제 스토리지까지 내려보내는 호출인데, HDD에서는 수 ms, SSD에서도 수백 µs가 걸린다.
+
+**핵심은 "커밋 당 1회 fsync"**라는 점이다. 그래서 커밋 개수가 적재 시간을 좌우한다.
+
+---
+
+## 1. 단순 INSERT는 왜 느린가
+
+가장 흔히 만나는 안티패턴이다.
+
+```python
+for row in rows:
+    cur.execute("INSERT INTO orders VALUES (%s, %s, %s)", row)
+    conn.commit()
+```
+
+한 행마다 커밋 → 한 행마다 fsync. 100만 건 적재에 100만 번의 fsync가 일어난다. SSD에서도 수분~수십분 걸리는 게 보통이다.
+
+### 개선 1: 커밋을 묶는다
+
+```python
+for row in rows:
+    cur.execute("INSERT INTO orders VALUES (%s, %s, %s)", row)
+conn.commit()
+```
+
+한 번의 커밋으로 모든 INSERT가 묶인다. fsync 1회. 이것만으로 수십 배 빨라진다.
+
+### 개선 2: Multi-row INSERT
+
+```python
+cur.executemany("INSERT INTO orders VALUES (%s, %s, %s)", rows)
+# 혹은
+INSERT INTO orders VALUES (r1), (r2), (r3), ...;
+```
+
+한 번의 SQL 파싱·계획 수립으로 여러 행을 처리하므로 클라이언트-서버 왕복(Round Trip)도 줄어든다.
+
+### INSERT의 근본적 한계
+
+그래도 INSERT는 **행 단위 경로**를 통과한다. 파싱·계획 수립·제약조건 검사·인덱스 갱신이 각 행마다 실행된다. 아무리 최적화해도 COPY만큼 빠르지는 않다.
+
+---
+
+## 2. COPY — 벌크 경로
+
+`COPY`는 PostgreSQL이 **대량 적재를 위해 준비한 전용 경로**다. INSERT와는 구현 자체가 다르다.
+
+```sql
+COPY orders (id, user_id, amount) FROM '/path/to/orders.csv' WITH (FORMAT csv);
+```
+
+또는 클라이언트에서 스트리밍:
+
+```python
+with open('orders.csv') as f:
+    cur.copy_expert(
+        "COPY orders (id, user_id, amount) FROM STDIN WITH (FORMAT csv)",
+        f
+    )
+```
+
+### 왜 빠른가
+
+- **파싱 생략**: 행마다 SQL 파싱을 하지 않는다. COPY 프로토콜은 바이너리 또는 텍스트 스트림을 바로 파싱한다.
+- **제약조건 일괄 검사**: 가능한 한 배치 단위로 검사를 묶는다.
+- **WAL 기록 최적화**: 같은 페이지에 여러 행이 들어갈 때 WAL 기록을 페이지 단위로 정리한다.
+- **단일 트랜잭션**: COPY 전체가 한 트랜잭션이므로 fsync는 끝에 1회.
+
+실측하면 같은 데이터 기준으로 INSERT 대비 **5~10배, 많게는 20배까지** 빨라진다.
+
+### COPY의 포맷 선택
+
+텍스트 CSV 외에 **바이너리 포맷**(`FORMAT binary`)을 지원한다. 바이너리는 타입 변환 비용이 없어 더 빠르지만, 엔디안·버전에 의존하므로 같은 PostgreSQL 버전 간 이동에만 권장된다.
+
+최근에는 **Parquet → COPY** 조합이 자주 쓰인다. Parquet의 컬럼형 압축 덕분에 파일 자체가 작고, `pg_parquet` 확장이나 별도 변환 스텝을 거쳐 적재하면 대용량 분석 데이터에 특히 효과적이다.
+
+---
+
+## 3. UNLOGGED 테이블 — WAL을 아예 끄는 방법
+
+```sql
+CREATE UNLOGGED TABLE staging_orders (...);
+```
+
+UNLOGGED 테이블은 **WAL에 기록되지 않는다**. fsync가 없으니 적재가 매우 빠르다.
+
+### 트레이드오프
+
+- **Crash 후 데이터가 사라진다**. 정확히는 비정상 종료 후 테이블이 자동으로 TRUNCATE된다.
+- **Replication되지 않는다**. Replica에는 스트리밍되지 않는다.
+
+따라서 UNLOGGED는 **"언제든 재생성 가능한 중간 단계 데이터"**에만 쓴다. 예를 들어:
+
+- 외부 파일에서 staging 테이블로 적재 → 변환 → 목적 테이블로 INSERT
+- 일시적 집계 결과 저장소
+- ETL의 중간 테이블
+
+### 패턴: UNLOGGED → LOGGED 전환
+
+UNLOGGED로 빠르게 적재한 뒤, 운영용 LOGGED 테이블로 바꾸는 것도 가능하다.
+
+```sql
+ALTER TABLE staging_orders SET LOGGED;
+```
+
+이 시점에 한 번의 전체 테이블 쓰기(WAL 기록)가 일어난다. 그래도 적재 중의 WAL은 아예 안 쓰니 총 시간은 짧아진다.
+
+---
+
+## 4. 적재 시 인덱스와 제약조건 다루기
+
+대량 적재의 또 다른 큰 비용은 **인덱스 유지**다. 100만 건 INSERT는 **인덱스 수 × 100만 번의 B-tree 갱신**을 동반한다.
+
+### 패턴: 인덱스 제거 → 적재 → 재생성
+
+```sql
+-- 1. 인덱스 제거
+DROP INDEX idx_orders_user_id;
+DROP INDEX idx_orders_created_at;
+
+-- 2. COPY 실행
+COPY orders FROM '...' ...;
+
+-- 3. 인덱스 재생성 (정렬 스캔으로 대량 구축이 훨씬 효율적)
+CREATE INDEX idx_orders_user_id ON orders (user_id);
+CREATE INDEX idx_orders_created_at ON orders (created_at);
+```
+
+대량 적재 후 인덱스를 처음부터 만드는 쪽이, 적재 중 각 행마다 인덱스를 갱신하는 쪽보다 빠르다. PostgreSQL의 `CREATE INDEX`는 정렬 기반 일괄 구축을 쓰기 때문이다.
+
+단, 운영 테이블이면 이 방식은 쓸 수 없다. 운영 중에는 `CREATE INDEX CONCURRENTLY`를 써야 락이 안 걸린다(대신 적재와 병행은 어려움).
+
+### 외래 키와 체크 제약
+
+외래 키와 체크 제약도 각 행마다 검증되므로 적재 중에는 비싸다. `ALTER TABLE ... DISABLE TRIGGER` 같은 기법이 있지만, 데이터 무결성을 해치므로 **오직 staging 단계에서만** 고려한다.
+
+---
+
+## 5. synchronous_commit과 checkpoint 튜닝
+
+적재 세션에만 한정해서 WAL fsync 비용을 줄이는 옵션이 있다.
+
+### synchronous_commit = off
+
+```sql
+SET synchronous_commit = off;
+```
+
+이 세션의 커밋이 fsync를 기다리지 않고 즉시 반환된다. WAL이 디스크로 내려가기 전에 장애가 나면 **최근 몇 초의 커밋이 유실**될 수 있다.
+
+"유실돼도 재실행하면 그만인 배치"에서 쓰기 적합하다. 외부 파일을 다시 적재할 수 있는 staging 테이블이 대표적인 사례다.
+
+### maintenance_work_mem 조정
+
+인덱스 구축이나 정렬 기반 작업에 쓰이는 메모리다. 기본값은 64MB로 작다. 대량 적재 후 인덱스 재생성할 때는 이 값을 넉넉히 올리는 게 좋다.
+
+```sql
+SET maintenance_work_mem = '1GB';
+```
+
+### checkpoint 관련
+
+WAL이 쌓이다 Checkpoint가 돌면 데이터 페이지를 디스크로 flush한다. 대량 적재 중 Checkpoint가 자주 돌면 I/O가 겹쳐서 느려진다. 운영 가능하다면 `max_wal_size`를 크게 잡아서 Checkpoint 빈도를 낮춘다.
+
+---
+
+## 6. 대안과 확장
+
+### pg_bulkload
+
+PostgreSQL 공식 도구는 아니지만, 인덱스 구축을 건너뛰고 바로 힙 파일에 기록하는 등 COPY보다 더 공격적인 최적화를 제공한다. 제약이 많아 선택적으로 쓰인다.
+
+### 파티션 스왑 (Partition Exchange)
+
+기존 파티션 테이블에 새 데이터를 넣을 때, **새 파티션을 별도로 적재하고 ATTACH**하는 방식이 있다.
+
+```sql
+-- 1. 별도 테이블에 적재
+CREATE TABLE orders_2026_04 (LIKE orders INCLUDING ALL);
+COPY orders_2026_04 FROM '...';
+CREATE INDEX ... ON orders_2026_04 (...);
+
+-- 2. 파티션으로 연결
+ALTER TABLE orders ATTACH PARTITION orders_2026_04
+    FOR VALUES FROM ('2026-04-01') TO ('2026-05-01');
+```
+
+운영 중인 파티션 테이블에 부담을 최소화하면서 대량 데이터를 붙이는 패턴이다.
+
+### INSERT ... ON CONFLICT DO UPDATE (UPSERT)
+
+배치로 "없으면 INSERT, 있으면 UPDATE"를 해야 할 때 쓴다.
+
+```sql
+INSERT INTO orders (id, amount)
+VALUES (1, 100), (2, 200), (3, 300)
+ON CONFLICT (id) DO UPDATE SET amount = EXCLUDED.amount;
+```
+
+UPSERT도 충분히 빠르지만, 각 행마다 인덱스 탐색이 발생하므로 대량 적재에는 COPY로 staging 후 MERGE하는 쪽이 더 빠른 경우가 많다.
+
+---
+
+## 의사결정 가이드
+
+상황별로 선택을 정리하면 다음과 같다.
+
+| 상황 | 권장 방식 |
+|------|---------|
+| 소량 (수천 건 이하), 운영 중 | Multi-row INSERT, 커밋 묶기 |
+| 대량 (수백만 건), 1회성 배치 | COPY + 인덱스 제거/재생성 |
+| ETL 중간 단계, 재실행 가능 | UNLOGGED + COPY |
+| 파티션 테이블에 대량 추가 | 신규 파티션을 별도로 적재 후 ATTACH |
+| 한 번 적재 후 바로 분석 | UNLOGGED + COPY + `synchronous_commit = off` |
+| UPSERT가 섞인 배치 | COPY to staging → MERGE |
+
+---
+
+## 요약
+
+- PostgreSQL의 쓰기는 WAL을 거치며, **커밋 당 1회의 fsync**가 기본 비용이다.
+- 단순 INSERT가 느린 이유는 fsync 횟수와 행 단위 파싱 비용. 커밋을 묶고 Multi-row로 바꾸는 것만으로 큰 개선.
+- COPY는 전용 벌크 경로로 파싱과 WAL 기록을 페이지 단위로 정리해 5~20배 빠르다.
+- UNLOGGED 테이블은 WAL을 끄는 극단적 최적화. 유실 허용 가능한 staging에만 쓴다.
+- 대량 적재 시 **인덱스 제거 후 재생성**이 각 행에 인덱스를 갱신하는 것보다 빠르다.
+- 적재 세션에 `synchronous_commit = off`를 쓰면 fsync 대기 없이 커밋이 가능(소량 유실 허용 시).
+- 파티션 테이블에는 **신규 파티션 별도 적재 후 ATTACH** 패턴이 운영 부담이 적다.
+
+## 참고
+
+- [PostgreSQL Documentation — Reliability and the Write-Ahead Log](https://www.postgresql.org/docs/current/wal-intro.html)
+- [PostgreSQL Documentation — COPY](https://www.postgresql.org/docs/current/sql-copy.html)
+- [PostgreSQL Documentation — Populating a Database](https://www.postgresql.org/docs/current/populate.html)
+- [PostgreSQL Documentation — Asynchronous Commit](https://www.postgresql.org/docs/current/wal-async-commit.html)
+- [PostgreSQL Documentation — CREATE UNLOGGED TABLE](https://www.postgresql.org/docs/current/sql-createtable.html#SQL-CREATETABLE-UNLOGGED)

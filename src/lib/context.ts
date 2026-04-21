@@ -3,6 +3,7 @@ import path from "path";
 
 const aboutDir = path.join(process.cwd(), "content", "about");
 const blogDir = path.join(process.cwd(), "content", "blog");
+const portfolioDir = path.join(process.cwd(), "content", "portfolio");
 
 function readMdFiles(dir: string): string {
   if (!fs.existsSync(dir)) return "";
@@ -30,14 +31,25 @@ export function getBlogContext(): string {
   return readMdFiles(blogDir);
 }
 
-export function getFullContext(): string {
+export function getPortfolioContext(): string {
+  return readMdFiles(portfolioDir);
+}
+
+export function getFullContext(options?: { includeBlog?: boolean }): string {
   const about = getAboutContext();
-  const blog = getBlogContext();
+  const portfolio = getPortfolioContext();
 
   let context = "=== 유현준에 대한 정보 ===\n\n" + about;
 
-  if (blog.trim()) {
-    context += "\n=== 블로그 글 (기술 공부 기록) ===\n\n" + blog;
+  if (portfolio.trim()) {
+    context += "\n=== 포트폴리오 프로젝트 상세 ===\n\n" + portfolio;
+  }
+
+  if (options?.includeBlog) {
+    const blog = getBlogContext();
+    if (blog.trim()) {
+      context += "\n=== 블로그 글 (기술 공부 기록) ===\n\n" + blog;
+    }
   }
 
   return context;

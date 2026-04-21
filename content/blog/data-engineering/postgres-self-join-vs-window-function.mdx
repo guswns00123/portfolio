@@ -1,0 +1,208 @@
+---
+title: "Self-Join vs Window Function: 시계열 쿼리에서 왜 LEAD/LAG이 압도적으로 빠른가"
+date: "2026-04-15"
+category: "data-engineering"
+description: "시계열 데이터에서 이전/다음 행을 연결할 때 Self-Join과 Window Function의 실행 계획 차이를 분석하고, 언제 어떤 방식을 선택해야 하는지 정리합니다."
+tags: ["postgresql", "sql", "window-function", "query-optimization", "explain-analyze"]
+---
+
+
+## 들어가며
+
+시계열 데이터에서 "같은 키 내에서 이전 행과 다음 행을 붙이는" 연산은 자주 등장한다. GPS 로그에서 이전 지점과의 거리, 주가 데이터에서 전일 대비 변동, 주문 로그에서 이전 주문과의 시간 간격 등이 모두 같은 패턴이다.
+
+이 연산을 Self-Join으로 구현한 쿼리를 Window Function으로 전환했을 때 성능이 수 배~수십 배 개선되는 경우를 자주 본다. 표면적으로는 "같은 결과"가 나오는데 왜 이렇게 차이가 나는지, 내부 동작 수준에서 정리해 본다.
+
+---
+
+## 문제 상황: 시계열 데이터 이어붙이기
+
+차량 GPS 로그가 있고, 각 차량의 연속된 위치 간 거리를 계산하고 싶다고 해 보자.
+
+```sql
+CREATE TABLE vehicle_gps (
+    vehicle_id  BIGINT,
+    ts          TIMESTAMP,
+    lat         DOUBLE PRECISION,
+    lon         DOUBLE PRECISION
+);
+```
+
+## 1. Self-Join 방식
+
+가장 흔한 접근은 자기 자신과 JOIN을 거는 방식이다.
+
+```sql
+SELECT a.vehicle_id,
+       a.ts  AS cur_ts,
+       b.ts  AS next_ts,
+       ST_Distance(
+           ST_MakePoint(a.lon, a.lat)::geography,
+           ST_MakePoint(b.lon, b.lat)::geography
+       ) AS distance_m
+FROM vehicle_gps a
+JOIN vehicle_gps b
+  ON a.vehicle_id = b.vehicle_id
+ AND b.ts = (
+         SELECT MIN(ts)
+         FROM vehicle_gps c
+         WHERE c.vehicle_id = a.vehicle_id
+           AND c.ts > a.ts
+     );
+```
+
+직관적이지만 내부 동작은 대단히 비싸다.
+
+### 무엇이 문제인가
+
+각 행 `a`에 대해 **서브쿼리가 매번 실행**된다. 한 차량의 데이터가 `N`건이라면:
+
+- 서브쿼리에서 해당 차량의 이후 시각 중 최솟값을 찾기 위해 스캔이 필요
+- JOIN 조건 `b.ts = (MIN ...)`을 확인하기 위해 또 한 번 접근
+- 결과적으로 **차량당 `O(N²)`에 근접한 비용**
+
+EXPLAIN ANALYZE를 돌려 보면 보통 다음과 같은 실행 계획이 나온다.
+
+```text
+Nested Loop  (cost=... rows=... loops=N)
+  ->  Seq Scan on vehicle_gps a
+  ->  Index Scan on vehicle_gps b
+        Filter: (b.ts = SubPlan)
+        SubPlan
+          ->  Aggregate
+                ->  Index Scan on vehicle_gps c
+```
+
+`SubPlan`이 외부 루프의 각 행마다 다시 실행되는 구조가 보인다. 행 수가 늘어나면 이 구조는 선형 이상으로 느려진다.
+
+---
+
+## 2. Window Function 방식
+
+`LEAD`를 사용하면 같은 로직을 한 번의 스캔과 한 번의 정렬로 처리한다.
+
+```sql
+SELECT vehicle_id,
+       ts AS cur_ts,
+       LEAD(ts)  OVER (PARTITION BY vehicle_id ORDER BY ts) AS next_ts,
+       ST_Distance(
+           ST_MakePoint(lon, lat)::geography,
+           ST_MakePoint(
+               LEAD(lon) OVER (PARTITION BY vehicle_id ORDER BY ts),
+               LEAD(lat) OVER (PARTITION BY vehicle_id ORDER BY ts)
+           )::geography
+       ) AS distance_m
+FROM vehicle_gps;
+```
+
+실행 계획은 훨씬 단순하다.
+
+```text
+WindowAgg  (cost=... rows=N)
+  ->  Sort
+        Sort Key: vehicle_id, ts
+        ->  Seq Scan on vehicle_gps
+```
+
+- **Seq Scan**: 테이블 1회 스캔
+- **Sort**: `(vehicle_id, ts)` 기준 한 번 정렬
+- **WindowAgg**: 정렬된 데이터를 순서대로 훑으면서 `LEAD` 값을 채움
+
+즉, 전체 비용이 대체로 `O(N log N)`(정렬) + `O(N)`(Window 처리)에 수렴한다.
+
+---
+
+## Window Function의 내부 동작
+
+Window Function의 핵심은 **Partition**, **Ordering**, **Frame** 세 개념이다.
+
+### Partition
+
+`PARTITION BY vehicle_id`는 같은 `vehicle_id`끼리 묶는다. 각 파티션은 독립적으로 처리된다. Partition이 없으면 전체 테이블이 하나의 파티션이 된다.
+
+### Ordering
+
+`ORDER BY ts`는 파티션 내부 정렬 순서를 결정한다. `LEAD/LAG`는 이 순서가 있어야 의미를 가진다.
+
+### Frame
+
+Frame은 "현재 행 기준으로 어떤 범위까지 볼지"를 정의한다. `SUM() OVER (...)`처럼 집계에서는 Frame이 중요하지만, `LEAD/LAG/ROW_NUMBER`에서는 Frame이 사실상 불필요하다.
+
+PostgreSQL은 `ORDER BY`만 있고 Frame 지정이 없으면 기본 Frame으로 `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`를 쓴다. `LEAD/LAG`에는 영향이 없지만, `SUM/AVG` 같은 집계를 Window로 쓸 때는 의도하지 않은 누적 계산이 일어나니 주의해야 한다.
+
+---
+
+## LEAD / LAG / ROW_NUMBER 구분
+
+세 함수는 자주 같이 쓰지만 목적이 다르다.
+
+| 함수 | 반환 | 대표 용도 |
+|------|------|---------|
+| `LEAD(col, n)` | 이후 n번째 행의 `col` | 다음 이벤트 시각, 다음 값 |
+| `LAG(col, n)` | 이전 n번째 행의 `col` | 이전 값, 변화량 계산 |
+| `ROW_NUMBER()` | 파티션 내 순번 | 중복 제거, Top-N per group |
+
+세 함수 모두 내부적으로는 정렬된 파티션을 한 번 스캔하면서 상태를 유지하는 방식이므로 비용이 같은 급이다.
+
+---
+
+## Window Function을 못 쓰는 경우
+
+Window Function이 Self-Join을 항상 대체하지는 않는다. 다음 경우는 Window로 풀기 어렵거나 불가능하다.
+
+### 1. 서로 다른 테이블을 시계열로 매칭해야 할 때
+
+주문 테이블과 로그 테이블에서 "주문 이후 가장 가까운 로그"를 찾는 경우, 한 테이블만 스캔하는 Window로는 해결이 안 된다. `LATERAL JOIN`이 이 경우에 더 적절하다.
+
+```sql
+SELECT o.id, l.ts AS next_log_ts
+FROM orders o
+LEFT JOIN LATERAL (
+    SELECT ts
+    FROM logs l
+    WHERE l.user_id = o.user_id AND l.ts >= o.created_at
+    ORDER BY l.ts
+    LIMIT 1
+) l ON true;
+```
+
+### 2. 조건부 LEAD/LAG
+
+"바로 다음 행이 아니라, 특정 조건을 만족하는 다음 행"은 Window로 직접 표현이 어렵다. 이 경우 `FILTER` 절이나 서브쿼리 조합이 필요하다.
+
+### 3. 행 개수가 변하는 변환
+
+`LEAD/LAG`는 "같은 행 개수"를 유지한다. 여러 행을 하나로 합치거나 한 행을 여러 행으로 펼치는 변환은 Window가 아니라 `GROUP BY` 또는 `LATERAL`이 맞다.
+
+---
+
+## 성능이 어디서 결정되는가
+
+Window Function이 Self-Join보다 빠른 이유를 한 문장으로 정리하면, **"동일한 정렬 결과를 반복 계산하지 않기 때문"**이다.
+
+Self-Join은 외부 루프의 각 행마다 내부 조회를 다시 수행한다. Window Function은 한 번 정렬된 결과를 순차적으로 소비하면서 상태(이전/다음 값 포인터)만 갱신한다.
+
+따라서 **데이터가 이미 정렬된 인덱스 순서로 스캔 가능하다면**, Sort 단계조차 생략돼 `O(N)`까지 내려간다. 다음과 같은 인덱스를 만들면 Sort가 사라진다.
+
+```sql
+CREATE INDEX idx_vehicle_gps_ts
+ON vehicle_gps (vehicle_id, ts);
+```
+
+EXPLAIN에서 `Sort` 노드가 빠지고 `Index Scan` 위에 바로 `WindowAgg`가 붙은 계획을 볼 수 있다. 이건 Self-Join에는 없는 최적화다.
+
+---
+
+## 요약
+
+- 시계열 "이전/다음 행 연결"은 Self-Join보다 Window Function이 거의 항상 빠르다.
+- Self-Join은 외부 루프 × 내부 조회 구조로 `O(N²)`에 수렴하고, Window는 정렬 1회 + 순차 스캔 1회로 `O(N log N)`이다.
+- `(partition_key, order_key)` 복합 인덱스가 있으면 Sort마저 생략되어 `O(N)`에 가까워진다.
+- Window Function의 한계는 **다른 테이블 매칭**, **조건부 이동**, **행 개수 변환**이며, 이 경우는 `LATERAL JOIN`이 대안이다.
+- `LEAD/LAG`에서는 Frame을 명시적으로 지정하지 않아도 되지만, `SUM/AVG` 등 집계 Window에서는 기본 Frame이 누적 계산이라는 점을 의식해야 한다.
+
+## 참고
+
+- [PostgreSQL Documentation — Window Functions](https://www.postgresql.org/docs/current/tutorial-window.html)
+- [PostgreSQL Documentation — Window Function Calls](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-WINDOW-FUNCTIONS)
+- [PostgreSQL Wiki — SQL Optimization](https://wiki.postgresql.org/wiki/SQL_Optimization)

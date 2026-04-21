@@ -1,0 +1,261 @@
+---
+title: "PostgreSQL VACUUM이 왜 필요한가: MVCC와 Dead Tuple의 이해"
+date: "2026-04-17"
+category: "data-engineering"
+description: "PostgreSQL의 MVCC 동작 원리, Dead Tuple이 생기는 이유, VACUUM과 autovacuum의 역할, ANALYZE와 Planner 통계의 관계를 정리합니다."
+tags: ["postgresql", "vacuum", "mvcc", "dead-tuple", "autovacuum", "analyze"]
+---
+
+
+## 들어가며
+
+배치로 매일 데이터가 쌓이는 테이블에서 시간이 지나면 같은 쿼리가 점점 느려지는 현상을 본 적이 있다. `VACUUM`을 돌리고 나면 다시 빨라졌다. 왜 이런 일이 벌어지는가? 답은 PostgreSQL의 **MVCC**와 **Dead Tuple**에 있다.
+
+이 글은 MVCC의 기본 동작부터 시작해서, Dead Tuple이 쌓이는 이유, VACUUM이 하는 일, autovacuum 파라미터 튜닝, 그리고 ANALYZE가 Planner에 미치는 영향까지 정리한다.
+
+---
+
+## MVCC란 무엇인가
+
+MVCC는 **Multi-Version Concurrency Control**의 줄임말이다. 이름 그대로 "여러 버전을 유지하면서 동시성을 제어하는" 기법이다.
+
+전통적인 잠금 기반 DB에서는 읽기와 쓰기가 경합하면 서로 대기해야 한다. MVCC는 이 문제를 **"쓰기는 새 버전을 만들고, 읽기는 해당 트랜잭션 시점의 버전을 본다"**로 해결한다. 결과적으로 **읽기는 쓰기를 막지 않고, 쓰기도 읽기를 막지 않는다**.
+
+PostgreSQL은 처음부터 MVCC를 기반으로 설계되었다. 이 점이 다른 RDBMS와 가장 큰 차이 중 하나다.
+
+---
+
+## 행에는 눈에 안 보이는 두 개의 시스템 컬럼이 있다
+
+PostgreSQL 테이블의 모든 행은 실제로 아래 두 시스템 컬럼을 숨기고 있다.
+
+- `xmin`: 이 행을 **생성한 트랜잭션 ID**
+- `xmax`: 이 행을 **삭제한 트랜잭션 ID** (없으면 0)
+
+확인하고 싶으면 이렇게 쿼리할 수 있다.
+
+```sql
+SELECT xmin, xmax, * FROM orders LIMIT 3;
+```
+
+가시성 규칙은 대략 다음과 같다.
+
+> "내 트랜잭션 ID가 이 행의 `xmin`보다 크거나 같고, `xmax`가 0이거나 내 트랜잭션 ID보다 크면 → 보인다."
+
+이 규칙 덕분에 트랜잭션 A가 행을 수정하고 있어도 트랜잭션 B는 여전히 수정 전의 행을 읽을 수 있다. 서로 다른 버전을 보는 것이다.
+
+---
+
+## UPDATE와 DELETE가 실제로 하는 일
+
+여기서 중요한 점이 있다. **PostgreSQL의 UPDATE와 DELETE는 원본 행을 덮어쓰거나 지우지 않는다.**
+
+### DELETE
+
+`DELETE`는 행을 실제로 지우는 게 아니라, 해당 행의 `xmax`에 현재 트랜잭션 ID를 기록한다. 이후 트랜잭션들은 "이 행은 xmax 트랜잭션이 삭제했다"고 판단해서 무시한다. 하지만 **물리적 데이터는 여전히 디스크에 남아 있다**.
+
+### UPDATE
+
+`UPDATE`는 기존 행의 `xmax`를 설정해서 "삭제됨" 처리하고, 동시에 **새로운 행을 추가**한다. 즉, UPDATE는 내부적으로 `DELETE + INSERT`다. 업데이트 후 테이블에는 **같은 논리적 행에 대해 두 개의 물리적 행**이 존재한다. 이전 버전과 새 버전이다.
+
+이 구조가 MVCC를 가능하게 한다. 동시에 돌아가는 다른 트랜잭션이 여전히 이전 버전을 볼 수 있기 때문이다.
+
+---
+
+## Dead Tuple과 Bloat
+
+어떤 트랜잭션도 더 이상 참조하지 않는 옛날 버전의 행을 **Dead Tuple**이라 한다. 이 Dead Tuple은 가만히 두면 다음 문제를 일으킨다.
+
+### 1. 테이블과 인덱스가 비대해진다 (Bloat)
+
+물리적 파일에 Dead Tuple이 계속 남아 있으므로 테이블 크기가 실제 데이터보다 훨씬 커진다. 인덱스도 같은 문제를 겪는다. 이렇게 공간을 낭비하는 현상을 **Bloat**라고 부른다.
+
+### 2. 스캔이 느려진다
+
+Seq Scan은 Dead Tuple이 있는 페이지도 전부 읽는다. 테이블이 두 배로 부풀어 있으면 스캔도 두 배 느리다. Index Scan도 인덱스 자체가 비대해지고, 힙 페이지 방문 시 가시성 검사를 Dead Tuple에 대해서도 수행해야 한다.
+
+### 3. 캐시 효율이 떨어진다
+
+`shared_buffers` 메모리에 올라오는 페이지 비율이 낮아진다. 실제 데이터 1개를 읽기 위해 더 많은 페이지를 접근하므로 Buffer Hit Rate가 떨어진다.
+
+---
+
+## VACUUM이 하는 일
+
+`VACUUM`은 Dead Tuple을 회수하고 테이블을 재사용 가능한 상태로 되돌리는 작업이다. 크게 세 가지 일을 한다.
+
+### 1. Dead Tuple 공간을 "재사용 가능"으로 표시
+
+VACUUM은 Dead Tuple이 차지하던 공간을 **FSM(Free Space Map)**에 등록한다. 이후 INSERT/UPDATE가 새 행을 써야 할 때, 파일 끝에 붙이는 대신 이 빈 공간을 재사용한다.
+
+중요한 점: **일반 VACUUM은 테이블 파일 크기 자체를 줄이지 않는다.** 공간을 회수하되 OS에 돌려주지는 않는다. 나중에 다시 쓰기 위해 유지해 둔다.
+
+### 2. Visibility Map 갱신
+
+PostgreSQL은 각 페이지가 "모든 트랜잭션에게 보이는 행만 있는지"를 추적하는 Visibility Map을 관리한다. VACUUM은 이걸 갱신한다.
+
+Visibility Map이 최신 상태라야 **Index-Only Scan**이 힙 방문을 생략하고 인덱스만으로 결과를 반환할 수 있다. 즉 VACUUM이 안 돌면 Index-Only Scan이 제 성능을 못 낸다.
+
+### 3. 트랜잭션 ID Wraparound 방지
+
+PostgreSQL의 트랜잭션 ID는 32비트 정수다. 약 42억 번 사용되면 한 바퀴 돌아야 하는데, 제대로 관리하지 않으면 "미래 트랜잭션"으로 오해돼서 데이터가 안 보이는 사태가 벌어진다.
+
+VACUUM은 오래된 트랜잭션 ID를 "frozen" 상태로 표시해서 이 문제를 방지한다. 이걸 `VACUUM FREEZE`라 한다. autovacuum이 이 일을 주기적으로 해 준다.
+
+---
+
+## VACUUM vs VACUUM FULL
+
+두 명령은 이름은 비슷하지만 동작이 완전히 다르다.
+
+| 구분 | VACUUM | VACUUM FULL |
+|------|--------|-------------|
+| 동작 | Dead Tuple 공간을 재사용 가능으로 표시 | 테이블을 통째로 재작성해 Bloat 제거 |
+| 파일 크기 | 줄지 않음 | 실제로 줄어듦 |
+| 락 | SHARE UPDATE EXCLUSIVE (읽기/쓰기 가능) | ACCESS EXCLUSIVE (읽기도 불가) |
+| 사용 시점 | 일상적 운영 | Bloat가 심각할 때, 다운타임 허용 시 |
+
+**운영 서비스에서 VACUUM FULL은 함부로 쓰지 말 것.** 테이블 락이 걸리고, 테이블 크기만큼의 임시 공간이 필요하다. 대신 `pg_repack` 같은 확장을 쓰면 락 없이 Bloat 제거가 가능하다.
+
+---
+
+## Autovacuum
+
+일반적으로 VACUUM을 수동으로 돌리지 않는다. PostgreSQL은 기본적으로 **autovacuum**이라는 백그라운드 프로세스가 주기적으로 VACUUM과 ANALYZE를 자동 실행한다.
+
+### 언제 동작하나
+
+autovacuum은 각 테이블별로 다음 조건을 감시한다.
+
+```
+# VACUUM 트리거 조건
+dead_tuples > autovacuum_vacuum_threshold
+            + autovacuum_vacuum_scale_factor × table_rows
+
+# ANALYZE 트리거 조건
+modified_tuples > autovacuum_analyze_threshold
+                + autovacuum_analyze_scale_factor × table_rows
+```
+
+기본값은 다음과 같다.
+
+- `autovacuum_vacuum_threshold = 50`
+- `autovacuum_vacuum_scale_factor = 0.2` (전체 행의 20%)
+- `autovacuum_analyze_threshold = 50`
+- `autovacuum_analyze_scale_factor = 0.1` (전체 행의 10%)
+
+해석하면 **"전체 행의 20%가 Dead가 되면 VACUUM, 10%가 변경되면 ANALYZE"**다.
+
+### 큰 테이블에서의 문제
+
+이 기본값은 작은 테이블에는 괜찮지만 **큰 테이블에서는 너무 느슨하다**. 예를 들어 1억 건 테이블은 2천만 건이 Dead가 되어야 VACUUM이 돈다. 그때쯤이면 이미 Bloat가 심해진 상태다.
+
+큰 테이블은 테이블별로 파라미터를 낮추는 게 좋다.
+
+```sql
+ALTER TABLE big_table SET (
+    autovacuum_vacuum_scale_factor = 0.02,  -- 2%
+    autovacuum_analyze_scale_factor = 0.01  -- 1%
+);
+```
+
+### autovacuum이 따라잡지 못할 때
+
+대량 배치 INSERT/UPDATE가 반복되는 테이블은 autovacuum이 한 번 돌 때 처리량 제한 때문에 다음 배치가 시작되기 전에 끝나지 못하는 경우가 있다. 이 경우 다음을 고려한다.
+
+- `autovacuum_vacuum_cost_limit` 증가 (한 사이클에서 할 수 있는 작업량)
+- `autovacuum_max_workers` 증가 (동시에 여러 테이블 처리)
+- 배치 종료 직후 `VACUUM (ANALYZE) table;` 수동 실행
+
+---
+
+## ANALYZE와 Planner 통계
+
+`ANALYZE`는 VACUUM과 별개의 작업이다. 테이블의 **통계 정보**를 수집해서 `pg_statistic` 시스템 카탈로그에 저장한다.
+
+수집하는 주요 통계:
+
+- 컬럼별 **NULL 비율**
+- **평균 행 크기**
+- **DISTINCT 값의 추정 개수** (카디널리티)
+- **MCV**(Most Common Values): 가장 자주 나오는 값과 그 빈도
+- **히스토그램**: 값의 분포
+
+PostgreSQL Planner는 이 통계를 바탕으로 "이 조건으로 몇 행이 나올까"를 추정한다. 이 추정치가 실제와 다르면 Planner가 잘못된 실행 계획을 고른다 (예: Nested Loop을 골라야 하는데 Hash Join을 고르는 등).
+
+### 통계가 오래되면 왜 나쁜가
+
+대량 데이터 로드 직후, 혹은 특정 조건의 데이터 분포가 급격히 변한 후에는 통계가 현실과 어긋난다. Planner는 옛 분포를 기준으로 실행 계획을 고르므로 성능이 악화된다.
+
+대형 적재 직후에는 autovacuum이 ANALYZE를 돌리기 전에 수동으로 돌리는 것이 안전하다.
+
+```sql
+ANALYZE orders;
+```
+
+### 통계 정밀도 조정
+
+기본적으로 ANALYZE는 각 컬럼에 대해 100개의 히스토그램 버킷을 만든다. 분포가 복잡하고 쿼리 패턴이 민감한 컬럼은 이 수를 늘릴 수 있다.
+
+```sql
+ALTER TABLE orders ALTER COLUMN region_code SET STATISTICS 500;
+ANALYZE orders;
+```
+
+값이 클수록 정확하지만 통계 수집/저장 비용이 커진다.
+
+---
+
+## 실전 체크리스트
+
+### 느려진 테이블을 진단할 때
+
+```sql
+-- Dead Tuple 비율 확인
+SELECT schemaname, relname,
+       n_live_tup, n_dead_tup,
+       round(n_dead_tup::numeric / NULLIF(n_live_tup, 0), 3) AS dead_ratio,
+       last_vacuum, last_autovacuum,
+       last_analyze, last_autoanalyze
+FROM pg_stat_user_tables
+ORDER BY n_dead_tup DESC;
+```
+
+Dead 비율이 20%를 넘기면 VACUUM이 필요한 상태라고 보면 된다.
+
+### Bloat 추정
+
+`pgstattuple` 확장을 쓰면 더 정확한 Bloat 추정이 가능하다.
+
+```sql
+CREATE EXTENSION pgstattuple;
+SELECT * FROM pgstattuple('orders');
+```
+
+### 대량 배치 작업 후
+
+```sql
+VACUUM (ANALYZE, VERBOSE) table_name;
+```
+
+VERBOSE를 붙이면 Dead Tuple 회수량과 남은 공간 정보가 출력돼 진단에 유용하다.
+
+---
+
+## 요약
+
+- PostgreSQL은 MVCC를 쓰며, UPDATE/DELETE는 원본을 지우지 않고 새 버전을 만들거나 `xmax`를 기록한다.
+- 그래서 Dead Tuple이 쌓이고, 테이블/인덱스가 부풀어 Bloat가 생긴다.
+- VACUUM은 Dead 공간을 재사용 가능하게 표시하고, Visibility Map을 갱신하고, 트랜잭션 ID Wraparound를 방지한다.
+- 일반 VACUUM은 파일 크기를 줄이지 않는다. 크기를 줄이려면 VACUUM FULL 또는 `pg_repack`.
+- autovacuum 기본값은 큰 테이블에 부족하다. 테이블별로 scale_factor를 낮추는 게 낫다.
+- ANALYZE는 Planner 통계를 갱신한다. 대량 적재 직후에는 수동으로 실행하는 습관.
+- 진단은 `pg_stat_user_tables`의 Dead Tuple 비율과 마지막 VACUUM 시각으로 시작한다.
+
+## 참고
+
+- [PostgreSQL Documentation — Concurrency Control (MVCC)](https://www.postgresql.org/docs/current/mvcc.html)
+- [PostgreSQL Documentation — Routine Vacuuming](https://www.postgresql.org/docs/current/routine-vacuuming.html)
+- [PostgreSQL Documentation — The Autovacuum Daemon](https://www.postgresql.org/docs/current/routine-vacuuming.html#AUTOVACUUM)
+- [PostgreSQL Documentation — pg_statistic](https://www.postgresql.org/docs/current/catalog-pg-statistic.html)
+- [pg_repack](https://reorg.github.io/pg_repack/)

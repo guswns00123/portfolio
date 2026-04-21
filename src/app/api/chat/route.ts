@@ -1,7 +1,11 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { Ollama } from "ollama";
 import { getFullContext } from "@/lib/context";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const ollama = new Ollama({
+  host: process.env.OLLAMA_BASE_URL ?? "http://localhost:11434",
+});
+
+const MODEL = process.env.OLLAMA_MODEL ?? "gemma3:4b";
 
 function buildSystemPrompt(): string {
   const context = getFullContext();
@@ -36,28 +40,35 @@ export async function POST(request: Request) {
       systemPrompt += `\n\n현재 사용자가 보고 있는 페이지 컨텍스트:\n${pageContext}`;
     }
 
-    const model = genAI.getGenerativeModel({
-      model: "gemini-2.5-flash",
-      systemInstruction: systemPrompt,
+    const ollamaMessages = [
+      { role: "system", content: systemPrompt },
+      ...messages.map((m: { role: string; content: string }) => ({
+        role: m.role,
+        content: m.content,
+      })),
+    ];
+
+    const totalChars = ollamaMessages.reduce((sum, m) => sum + m.content.length, 0);
+    console.log(
+      `[/api/chat] messages=${ollamaMessages.length}, totalChars=${totalChars} (~${Math.ceil(totalChars / 3)} tokens est.)`
+    );
+
+    const stream = await ollama.chat({
+      model: MODEL,
+      messages: ollamaMessages,
+      stream: true,
+      options: {
+        num_ctx: 12288,
+        temperature: 0.3,
+      },
     });
-
-    // Gemini 형식으로 메시지 변환
-    const history = messages.slice(0, -1).map((m: { role: string; content: string }) => ({
-      role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: m.content }],
-    }));
-
-    const lastMessage = messages[messages.length - 1].content;
-
-    const chat = model.startChat({ history });
-    const result = await chat.sendMessageStream(lastMessage);
 
     const encoder = new TextEncoder();
     const readable = new ReadableStream({
       async start(controller) {
         try {
-          for await (const chunk of result.stream) {
-            const text = chunk.text();
+          for await (const part of stream) {
+            const text = part.message?.content;
             if (text) {
               const data = `data: ${JSON.stringify({ content: text })}\n\n`;
               controller.enqueue(encoder.encode(data));
@@ -86,6 +97,7 @@ export async function POST(request: Request) {
       },
     });
   } catch (err) {
+    console.error("[/api/chat] error:", err);
     const message = err instanceof Error ? err.message : "Internal error";
     return Response.json({ error: message }, { status: 500 });
   }
