@@ -6,12 +6,17 @@ import { useSession } from "next-auth/react";
 import { cn } from "@/lib/utils";
 import LoginButton from "@/components/auth/LoginButton";
 
-const publicNavItems = [{ href: "/portfolio", label: "Portfolio" }];
+const TISTORY_URL = "https://guswns00123.tistory.com/";
+
+const publicNavItems = [
+  { href: "/portfolio", label: "Portfolio", external: false as const },
+  { href: TISTORY_URL, label: "Blog", external: true as const },
+];
 
 const adminNavItems = [
-  { href: "/", label: "Home" },
-  { href: "/blog", label: "Blog" },
-  { href: "/portfolio", label: "Portfolio" },
+  { href: "/", label: "Home", external: false as const },
+  { href: "/portfolio", label: "Portfolio", external: false as const },
+  { href: TISTORY_URL, label: "Blog", external: true as const },
 ];
 
 export default function Header() {
@@ -27,21 +32,33 @@ export default function Header() {
           DE Portfolio
         </Link>
         <nav className="flex items-center gap-6">
-          {navItems.map((item) => (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={cn(
-                "text-sm transition-colors hover:text-foreground",
-                pathname === item.href ||
-                  (item.href !== "/" && pathname.startsWith(item.href))
-                  ? "text-foreground font-medium"
-                  : "text-muted-foreground"
-              )}
-            >
-              {item.label}
-            </Link>
-          ))}
+          {navItems.map((item) =>
+            item.external ? (
+              <a
+                key={item.href}
+                href={item.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm text-muted-foreground transition-colors hover:text-foreground"
+              >
+                {item.label}
+              </a>
+            ) : (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={cn(
+                  "text-sm transition-colors hover:text-foreground",
+                  pathname === item.href ||
+                    (item.href !== "/" && pathname.startsWith(item.href))
+                    ? "text-foreground font-medium"
+                    : "text-muted-foreground"
+                )}
+              >
+                {item.label}
+              </Link>
+            )
+          )}
           <div className="h-4 w-px bg-border" />
           <LoginButton />
         </nav>

@@ -21,14 +21,16 @@ export default function HomePage() {
             Portfolio
             <ArrowRight className="h-3 w-3 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
           </Link>
-          <Link
-            href="/blog"
+          <a
+            href="https://guswns00123.tistory.com/"
+            target="_blank"
+            rel="noopener noreferrer"
             className="group inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-medium hover:bg-accent transition-colors"
           >
             <BookOpen className="h-3.5 w-3.5" />
             Blog
             <ArrowRight className="h-3 w-3 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
-          </Link>
+          </a>
         </div>
       </div>
 
