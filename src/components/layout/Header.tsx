@@ -10,12 +10,14 @@ const TISTORY_URL = "https://guswns00123.tistory.com/";
 
 const publicNavItems = [
   { href: "/portfolio", label: "Portfolio", external: false as const },
+  { href: "/resume", label: "Resume", external: false as const },
   { href: TISTORY_URL, label: "Blog", external: true as const },
 ];
 
 const adminNavItems = [
   { href: "/", label: "Home", external: false as const },
   { href: "/portfolio", label: "Portfolio", external: false as const },
+  { href: "/resume", label: "Resume", external: false as const },
   { href: TISTORY_URL, label: "Blog", external: true as const },
 ];
 

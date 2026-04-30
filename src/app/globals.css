@@ -129,3 +129,48 @@
     @apply font-sans;
   }
 }
+
+/* ── Resume PDF print styles ── */
+@media print {
+  @page {
+    size: A4;
+    margin: 14mm;
+  }
+
+  /* 사이트 공통 UI 숨김 (Header / 챗봇은 print:hidden 클래스로도 보강됨) */
+  header {
+    display: none !important;
+  }
+
+  /* main 컨테이너 여백 제거 */
+  main {
+    max-width: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  body {
+    background: #fff !important;
+    font-size: 10.5pt;
+  }
+
+  /* 색상 인쇄 보존 */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* 이력서 본문은 항상 화이트 배경 */
+  .resume-doc {
+    background: #fff !important;
+    border: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* 섹션 단위 페이지 분할 회피 */
+  .resume-doc section,
+  .resume-doc header {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}

@@ -122,7 +122,7 @@ export default function ChatPanel() {
   return (
     <div
       className={cn(
-        "fixed top-0 right-0 z-40 flex h-full w-full flex-col border-l bg-background shadow-xl transition-transform duration-300 sm:w-[400px]",
+        "fixed top-0 right-0 z-40 flex h-full w-full flex-col border-l bg-background shadow-xl transition-transform duration-300 sm:w-[400px] print:hidden",
         isOpen ? "translate-x-0" : "translate-x-full"
       )}
     >

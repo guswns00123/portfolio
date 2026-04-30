@@ -1,0 +1,222 @@
+{
+  "personal": {
+    "nameKo": "유현준",
+    "nameEn": "Yoo Hyun Jun",
+    "title": "데이터 엔지니어",
+    "photo": "/profile.jpg",
+    "email": "guswns00123@gmail.com",
+    "phone": "+82 010-3789-5946",
+    "birthdate": "1997.09.11",
+    "military": "공군 병장 만기 전역"
+  },
+  "coreCompetencies": [
+    "Airflow 기반 파이프라인 자동화 및 운영 (DAG 15개+)",
+    "도메인 분석 기반 구조 설계 및 산출 속도 개선",
+    "pgvector / RAG · Text-to-SQL 등 LLM 데이터 인프라",
+    "비개발 직군 / 분석가와의 직접 소통 기반 협업"
+  ],
+  "summary": [
+    {
+      "headline": "데이터로 문제를 해결하고 측정 가능한 개선을 만듭니다",
+      "body": "Python·Airflow 기반 데이터 파이프라인을 직접 설계·자동화하며, 빅밸류에서 4개 프로젝트를 책임지고 운영했습니다. 검역본부 12배(1일→2시간), 부동산 시세 산출 3배(6시간→2시간) 등 단순 코드 작성을 넘어 측정 가능한 개선 성과를 만들어 왔습니다."
+    },
+    {
+      "headline": "도메인을 이해해야 신뢰할 수 있는 파이프라인이 나옵니다",
+      "body": "경매 파이프라인에서 도메인을 충분히 파악하지 않아 수집 오류가 반복된 경험을 계기로, '도메인 이해 → 설계 → 소통 → 구현' 순서를 일하는 원칙으로 삼았습니다. 검역본부 공무원, 금융권 고객사, 사내 분석가 등 다양한 사용자와 직접 소통하며 그들의 요구사항을 파이프라인 설계에 반영해 왔습니다."
+    },
+    {
+      "headline": "LLM·실시간 영역으로 확장하며 데이터 민주화를 지향합니다",
+      "body": "실무에서 못 다룬 영역은 개인 프로젝트로 학습합니다 — pgvector 기반 RAG·Text-to-SQL(토큰 84% 절감, 정확도 100%), TFT Lambda 분산 수집. 장기적으로는 비개발 직군도 셀프서비스로 데이터에 접근할 수 있는 데이터 민주화 플랫폼을 만드는 데이터 엔지니어가 되는 것이 지향점입니다."
+    }
+  ],
+  "experiences": [
+    {
+      "company": "빅밸류 (BigValue)",
+      "role": "데이터 엔지니어",
+      "employmentType": "정규직",
+      "period": "2025.03 ~ 2026.02",
+      "duration": "12개월",
+      "responsibilities": [
+        {
+          "title": "End-to-End 데이터 파이프라인 설계 및 운영",
+          "details": [
+            "Airflow DAG **15개+** 운영, 재시도·의존성·알림 설계로 무인 운영 안정성 확보"
+          ]
+        },
+        {
+          "title": "도메인 기반 데이터 모델링 및 자동 검수 체계 구축",
+          "details": [
+            "사용자 활용 패턴 분석 후 정규화 / 비정규화 결정 + 미매핑·이상치 사전 탐지 체계 도입"
+          ]
+        },
+        {
+          "title": "비개발 / 분석가 직군과의 협업",
+          "details": [
+            "공무원·금융권 고객사·사내 분석가와 직접 소통하여 요구사항을 파이프라인 설계에 반영"
+          ]
+        }
+      ],
+      "projects": [
+        {
+          "title": "검역본부 가축 질병 예측 데이터 파이프라인 (2025.06 ~ 2025.12)",
+          "details": [
+            "폐쇄망 환경에서 ASF / HPAI / FMD 예측 모델용 데이터 ETL 구축·운영 (**9개 DAG**)",
+            "레거시 산출 프로세스 처리 속도 **12x 개선 (1일 → 2시간)**",
+            "원격 무인 운영 안정성 확보 — 테이블별 task 분리 + 장애 대응 로그 체계 설계"
+          ]
+        },
+        {
+          "title": "부동산 시세 데이터 파이프라인 (2025.04 ~ 2026.02)",
+          "details": [
+            "금융권 고객사 월별 시세 생성·검수·납품 파이프라인 운영 (**6개 DAG**, 100m 격자 약 **1,300만 건**)",
+            "레거시 리팩토링으로 월간 시세 산출 시간 **3x 개선 (6시간 → 2시간)**",
+            "자동 검수 체계 도입으로 격자-시세 / PNU 미매핑 등 데이터 결함 사전 탐지·수정"
+          ]
+        },
+        {
+          "title": "경매 데이터 수집 파이프라인 (2025.04 ~ 2026.02)",
+          "details": [
+            "외부 판매용 경매 자동 수집·가공 파이프라인 구축 (3개 서버, 일 평균 **2,000~3,000건**)",
+            "IP 차단 대응 + 타겟 수집 최적화로 **수집 속도 2x 향상** (일 12,000건 → 4,000건)",
+            "분석가 활용을 고려한 비정규화 테이블 설계 (복합 PK: 사건번호+법원+매각기일)"
+          ]
+        },
+        {
+          "title": "도로 교차로 네트워크 구축 (2025.03 ~ 2025.04)",
+          "details": [
+            "사내 분석팀용 전국 도로 교차로 공간 데이터 확장 및 분석용 속성 설계",
+            "QGIS + Python 후처리로 공간 데이터 **4.6배 확장 (1.8만 → 8.4만 개)**"
+          ]
+        }
+      ]
+    }
+  ],
+  "projects": [
+    {
+      "name": "게임 무물봇 — 게임 맞춤형 LLM 챗봇 데이터 파이프라인",
+      "team": "2인 / DE·AI 데이터 아키텍처 100% 전담",
+      "period": "2026.03 ~ 진행 중",
+      "techStack": "Python, Airflow, PostgreSQL, pgvector, FastAPI, RAG, OpenAI, Next.js",
+      "highlights": [
+        "**수집 파이프라인 설계** — Airflow ETL로 로스트아크 / TFT API 수집·적재. API Key 2개 도메인 분리로 Rate Limit 분산 + 정적/동적 데이터 분리로 **일일 수집량 79% 절감 (1.9GB → 400MB)**",
+        "**RAG / Vector DB 통합 아키텍처** — pgvector로 RDB와 Vector DB를 단일 저장소로 통합, Retrieval 4단계 진화 + Few-shot 적용으로 **토큰 84% 절감, Text-to-SQL 정확도 100%, Cold Start 2,520ms → 0ms**",
+        "**데이터 정규화 / 쿼리 성능 개선** — 비정형 JSONB tooltip을 정규식 평탄화 + Numeric 컬럼화하여 EXPLAIN ANALYZE 기준 **쿼리 5.3배 향상 (0.644ms → 0.121ms)**",
+        "**LLM 호출 모니터링 시스템 자체 구축** — 3개 Generator(Analysis / SQL / Answer)별 토큰·응답시간·비용 비교 대시보드 개발로 팀원 프롬프트 디버깅 사이클 단축"
+      ],
+      "link": "https://game.mumulbot.com/"
+    },
+    {
+      "name": "TFT 챌린저 유저 주간 경기 데이터 파이프라인",
+      "team": "개인",
+      "period": "2024.08 ~ 2024.10",
+      "techStack": "Python, Airflow, AWS Lambda, S3, PostgreSQL, SparkSQL, Tableau, Docker",
+      "highlights": [
+        "로컬 Airflow heartbeat 에러를 Lambda 분리 아키텍처로 해소 (Airflow는 트리거만, 호출·처리는 Lambda)",
+        "API Rate Limit 대응을 위해 Lambda 3개씩 단계적 트리거로 누락률 최소화",
+        "DAG 2종 운영(User 적재/Game 수집), 6개 정규화 테이블로 유저-경기-유닛-특성 관계 모델링"
+      ],
+      "link": "https://github.com/guswns00123/TFT_data"
+    }
+  ],
+  "skills": [
+    {
+      "category": "언어",
+      "items": [
+        "Python",
+        "SQL"
+      ]
+    },
+    {
+      "category": "데이터베이스",
+      "items": [
+        "PostgreSQL",
+        "pgvector",
+        "Oracle"
+      ]
+    },
+    {
+      "category": "데이터 엔지니어링",
+      "items": [
+        "Apache Airflow",
+        "FastAPI",
+        "AWS Lambda",
+        "Hadoop"
+      ]
+    },
+    {
+      "category": "AI / LLM",
+      "items": [
+        "OpenAI API (Text-to-SQL · RAG)"
+      ]
+    },
+    {
+      "category": "Cloud / DevOps",
+      "items": [
+        "AWS (Lambda · S3)",
+        "Docker",
+        "Linux",
+        "Git"
+      ]
+    },
+    {
+      "category": "공간 / 기타",
+      "items": [
+        "QGIS",
+        "Selenium",
+        "Scrapy"
+      ]
+    }
+  ],
+  "education": [
+    {
+      "school": "홍콩중문대학교 (CUHK)",
+      "degree": "컴퓨터과학과 졸업",
+      "period": "2018.09 ~ 2024.04"
+    },
+    {
+      "school": "숭문고등학교",
+      "degree": "이공계열 졸업",
+      "period": "2013.03 ~ 2016.02"
+    }
+  ],
+  "certifications": [
+    {
+      "date": "2021.04",
+      "name": "SQLD (SQL Developer)",
+      "issuer": "한국데이터산업진흥원"
+    },
+    {
+      "date": "2024.02",
+      "name": "AWS Certified Cloud Practitioner",
+      "issuer": "Amazon Web Services"
+    }
+  ],
+  "languages": [
+    {
+      "language": "한국어",
+      "level": "원어민"
+    },
+    {
+      "language": "영어",
+      "level": "비즈니스 레벨 (홍콩 유학 5년+, CUHK 영어 강의 졸업)"
+    }
+  ],
+  "links": [
+    {
+      "label": "Portfolio",
+      "url": "https://portfolio-dun-psi-28.vercel.app/portfolio"
+    },
+    {
+      "label": "GitHub",
+      "url": "https://github.com/guswns00123"
+    },
+    {
+      "label": "Blog (Tistory)",
+      "url": "https://guswns00123.tistory.com/"
+    },
+    {
+      "label": "게임 무물봇 데모",
+      "url": "https://game.mumulbot.com/"
+    }
+  ]
+}

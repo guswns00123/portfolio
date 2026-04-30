@@ -11,7 +11,7 @@ export default function ChatToggle() {
     <Button
       onClick={toggle}
       size="icon"
-      className="fixed bottom-6 right-6 z-50 h-12 w-12 rounded-full shadow-lg"
+      className="fixed bottom-6 right-6 z-50 h-12 w-12 rounded-full shadow-lg print:hidden"
     >
       {isOpen ? <X className="h-5 w-5" /> : <MessageCircle className="h-5 w-5" />}
     </Button>
