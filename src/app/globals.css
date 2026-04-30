@@ -130,16 +130,95 @@
   }
 }
 
+/* ── 포트폴리오 본문 <details> 토글 스타일 ── */
+.prose details {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--muted);
+  padding: 0.75rem 1rem;
+  margin: 0.75rem 0;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.prose details:hover {
+  border-color: var(--ring);
+}
+
+.prose details[open] {
+  background: var(--background);
+  border-color: var(--ring);
+  padding: 1rem 1.25rem;
+}
+
+.prose summary {
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 0.95rem;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.15rem 0;
+  user-select: none;
+  color: var(--foreground);
+}
+
+/* 기본 disclosure 마커 제거 (Safari/Webkit) */
+.prose summary::-webkit-details-marker {
+  display: none;
+}
+
+/* 직접 그린 화살표 — 닫혀있을 때 ▸ */
+.prose summary::before {
+  content: "";
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+.prose details[open] summary::before {
+  transform: rotate(90deg);
+  opacity: 1;
+}
+
+.prose details > *:not(summary):first-of-type {
+  margin-top: 0.75rem;
+}
+
+.prose details > *:last-child {
+  margin-bottom: 0;
+}
+
+/* 인쇄 시 토글은 항상 펼침 */
+@media print {
+  .prose details {
+    border: none;
+    background: transparent;
+    padding: 0;
+  }
+  .prose details summary {
+    list-style: none;
+  }
+  .prose details summary::before {
+    display: none;
+  }
+  .prose details[open],
+  .prose details {
+    /* 인쇄 시 강제로 펼친 모양 */
+  }
+}
+
 /* ── Resume PDF print styles ── */
 @media print {
   @page {
     size: A4;
-    margin: 14mm;
-  }
-
-  /* 사이트 공통 UI 숨김 (Header / 챗봇은 print:hidden 클래스로도 보강됨) */
-  header {
-    display: none !important;
+    margin: 12mm;
   }
 
   /* main 컨테이너 여백 제거 */
@@ -151,7 +230,6 @@
 
   body {
     background: #fff !important;
-    font-size: 10.5pt;
   }
 
   /* 색상 인쇄 보존 */
@@ -160,16 +238,76 @@
     print-color-adjust: exact !important;
   }
 
-  /* 이력서 본문은 항상 화이트 배경 */
+  /* 이력서 본문 — 인쇄용 (2페이지를 자연스럽게 채우도록 간격 여유 부여) */
   .resume-doc {
     background: #fff !important;
     border: 0 !important;
     padding: 0 !important;
+    gap: 1rem !important;
+    line-height: 1.6 !important;
   }
 
-  /* 섹션 단위 페이지 분할 회피 */
-  .resume-doc section,
-  .resume-doc header {
+  /* Tailwind gap 유틸리티 — 화면보다는 작지만 콘텐츠가 페이지를 채우도록 여유 부여 */
+  .resume-doc .gap-7 { gap: 1rem !important; }
+  .resume-doc .gap-6 { gap: 0.85rem !important; }
+  .resume-doc .gap-5 { gap: 0.7rem !important; }
+  .resume-doc .gap-4 { gap: 0.55rem !important; }
+  .resume-doc .gap-3 { gap: 0.45rem !important; }
+  .resume-doc .gap-2 { gap: 0.3rem !important; }
+  .resume-doc .gap-1\.5 { gap: 0.2rem !important; }
+  .resume-doc .gap-1 { gap: 0.18rem !important; }
+
+  /* 본문 padding — 외곽만 제거, 내부는 약간 유지 */
+  .resume-doc .py-8 { padding-top: 0 !important; padding-bottom: 0 !important; }
+  .resume-doc .px-8 { padding-left: 0 !important; padding-right: 0 !important; }
+  .resume-doc .py-2 { padding-top: 0.25rem !important; padding-bottom: 0.25rem !important; }
+  .resume-doc .py-3 { padding-top: 0.35rem !important; padding-bottom: 0.35rem !important; }
+  .resume-doc .px-4 { padding-left: 0.5rem !important; padding-right: 0.5rem !important; }
+
+  /* 사진 축소 */
+  .resume-doc > header img {
+    width: 75px !important;
+    height: 95px !important;
+  }
+
+  /* 이름 / 섹션 / 프로젝트 제목 */
+  .resume-doc > header h1 {
+    font-size: 1.25rem !important;
+    letter-spacing: 0.16em !important;
+  }
+  .resume-doc h2 {
+    font-size: 0.9rem !important;
+  }
+  .resume-doc h3 {
+    font-size: 0.82rem !important;
+  }
+
+  /* 본문 텍스트 사이즈 일괄 축소 */
+  .resume-doc .text-base { font-size: 9pt !important; }
+  .resume-doc .text-sm { font-size: 8.5pt !important; }
+  .resume-doc .text-xs { font-size: 7.5pt !important; }
+  .resume-doc .text-lg { font-size: 9.5pt !important; }
+  .resume-doc .text-\[15px\] { font-size: 9pt !important; }
+  .resume-doc .text-\[14px\] { font-size: 8.5pt !important; }
+  .resume-doc .text-\[13px\] { font-size: 8pt !important; }
+  .resume-doc .text-\[12px\] { font-size: 7.5pt !important; }
+
+  /* margin — 약간 여유 있게 */
+  .resume-doc .mt-2 { margin-top: 0.35rem !important; }
+  .resume-doc .mt-1\.5 { margin-top: 0.25rem !important; }
+  .resume-doc .mt-3 { margin-top: 0.5rem !important; }
+  .resume-doc .mb-3 { margin-bottom: 0.4rem !important; }
+  .resume-doc .mb-2 { margin-bottom: 0.3rem !important; }
+  .resume-doc .mb-1\.5 { margin-bottom: 0.2rem !important; }
+
+  /* 핵심 역량 박스 패딩 축소 */
+  .resume-doc aside {
+    padding: 0.35rem 0.5rem !important;
+    min-width: 190px !important;
+  }
+
+  /* 페이지 분할은 자연 흐름에 맡기되, 헤더(사진+이름+핵심역량)만 분할 회피 */
+  .resume-doc > header {
     break-inside: avoid;
     page-break-inside: avoid;
   }

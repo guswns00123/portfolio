@@ -168,7 +168,7 @@ export default function ResumeView({ initial }: Props) {
           <div className="flex flex-col gap-3">
             {resume.summary.map((s, i) => (
               <div key={i} className="flex flex-col gap-1">
-                <p className="font-bold text-slate-900">[{s.headline}]</p>
+                <p className="text-[14px] font-bold text-slate-900">[{s.headline}]</p>
                 <p className="text-[14px] leading-relaxed text-slate-700">
                   <FormattedText text={s.body} />
                 </p>
@@ -228,18 +228,52 @@ export default function ResumeView({ initial }: Props) {
                     기술 스택: {p.techStack}
                   </p>
                 )}
-                <ul className="flex flex-col gap-1">
-                  {p.highlights.map((h, j) => (
-                    <li
-                      key={j}
-                      className="text-[14px] text-slate-700 leading-relaxed flex items-start gap-2"
-                    >
-                      <span className="text-slate-400 shrink-0">•</span>
-                      <span>
-                        <FormattedText text={h} />
-                      </span>
-                    </li>
-                  ))}
+                {p.portfolioLink && (
+                  <a
+                    href={p.portfolioLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[13px] text-sky-700 hover:opacity-70 mb-1.5 inline-block"
+                  >
+                    [상세 아키텍처 및 트러블슈팅 과정 포트폴리오 링크 🔗]
+                  </a>
+                )}
+                <ul className="flex flex-col gap-1.5">
+                  {p.highlights.map((h, j) =>
+                    typeof h === "string" ? (
+                      <li
+                        key={j}
+                        className="text-[14px] text-slate-700 leading-relaxed flex items-start gap-2"
+                      >
+                        <span className="text-slate-400 shrink-0">•</span>
+                        <span>
+                          <FormattedText text={h} />
+                        </span>
+                      </li>
+                    ) : (
+                      <li key={j} className="flex flex-col gap-1">
+                        <div className="text-[14px] text-slate-800 flex items-start gap-2">
+                          <span className="text-slate-400 shrink-0">•</span>
+                          <span className="font-medium">{h.title}</span>
+                        </div>
+                        {h.details.length > 0 && (
+                          <ul className="ml-5 flex flex-col gap-0.5">
+                            {h.details.map((d, k) => (
+                              <li
+                                key={k}
+                                className="text-[13px] text-slate-600 leading-relaxed flex items-start gap-2"
+                              >
+                                <span className="text-slate-400 shrink-0">-</span>
+                                <span>
+                                  <FormattedText text={d} />
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </li>
+                    )
+                  )}
                 </ul>
                 {p.link && (
                   <a

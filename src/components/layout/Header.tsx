@@ -28,7 +28,7 @@ export default function Header() {
   const navItems = session?.user ? adminNavItems : publicNavItems;
 
   return (
-    <header className="sticky top-0 z-40 border-b bg-background/80 backdrop-blur-sm">
+    <header className="sticky top-0 z-40 border-b bg-background/80 backdrop-blur-sm print:hidden">
       <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-6">
         <Link href={session?.user ? "/" : "/portfolio"} className="text-lg font-bold tracking-tight">
           DE Portfolio
