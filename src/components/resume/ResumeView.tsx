@@ -106,23 +106,23 @@ export default function ResumeView({ initial }: Props) {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* 액션 바 (인쇄 시 숨김) */}
-      <div className="flex items-center justify-end gap-2 print:hidden">
-        {isAdmin && (
+      {/* 액션 바 — 관리자(로그인) 전용. 인쇄 시에도 숨김 */}
+      {isAdmin && (
+        <div className="flex items-center justify-end gap-2 print:hidden">
           <button
             onClick={handleEdit}
             className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-accent transition-colors"
           >
             <Pencil className="h-3.5 w-3.5" /> 수정
           </button>
-        )}
-        <button
-          onClick={handlePrint}
-          className="inline-flex items-center gap-1.5 rounded-md border bg-foreground text-background px-3 py-1.5 text-sm hover:opacity-90 transition-opacity"
-        >
-          <Printer className="h-3.5 w-3.5" /> PDF 저장
-        </button>
-      </div>
+          <button
+            onClick={handlePrint}
+            className="inline-flex items-center gap-1.5 rounded-md border bg-foreground text-background px-3 py-1.5 text-sm hover:opacity-90 transition-opacity"
+          >
+            <Printer className="h-3.5 w-3.5" /> PDF 저장
+          </button>
+        </div>
+      )}
 
       {/* 이력서 본문 */}
       <article className="resume-doc bg-white text-slate-900 rounded-md border print:border-0 px-8 py-8 print:px-0 print:py-0 flex flex-col gap-7">
