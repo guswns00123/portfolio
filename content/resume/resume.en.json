@@ -1,0 +1,238 @@
+{
+  "personal": {
+    "nameKo": "유현준",
+    "nameEn": "Yoo Hyun Jun",
+    "title": "Data Engineer",
+    "photo": "/profile.jpg",
+    "email": "guswns00123@gmail.com",
+    "phone": "+82 010-3789-5946",
+    "birthdate": "1997.09.11",
+    "military": "ROK Air Force, Sergeant (Honorably Discharged)"
+  },
+  "coreCompetencies": [
+    "Airflow-based pipeline automation & operations (15+ DAGs)",
+    "Domain-driven schema design & throughput optimization",
+    "LLM data infrastructure: pgvector / RAG · Text-to-SQL",
+    "Direct collaboration with non-developer / analyst stakeholders"
+  ],
+  "summary": [
+    {
+      "headline": "Communicative Engineer Focused on Data Consumers",
+      "body": "I believe the true value of a Data Engineer lies in delivering 'consumer-friendly data' that teammates can leverage immediately. Beyond mechanical ingestion, I take ownership of the data environment by actively communicating with the analysts and developers who consume it."
+    },
+    {
+      "headline": "Tenacious Pursuit of Root Causes Over Surface Symptoms",
+      "body": "I am not satisfied with pipelines that merely run. When incidents occur, instead of applying quick workarounds, I dig into the architecture and logs to find the real cause. I enjoy structurally resolving the underlying problems beneath the symptoms and optimizing the system in the process."
+    },
+    {
+      "headline": "Proactive Curiosity for Absorbing Unfamiliar Technology",
+      "body": "Rather than settling for familiar tools, I personally engage with the latest data ecosystem trends — LLMs, Vector DBs — through hands-on side projects. I aim to be an engineer who absorbs needed technologies fearlessly, like a sponge, growing without limits."
+    }
+  ],
+  "experiences": [
+    {
+      "company": "BigValue",
+      "role": "Data Engineer",
+      "employmentType": "Full-time",
+      "period": "2025.02 ~ 2026.03",
+      "duration": "1 yr 2 mo",
+      "responsibilities": [
+        {
+          "title": "Design and Operation of End-to-End Data Pipelines",
+          "details": [
+            "Operated **15+ Airflow DAGs**, ensuring unattended-operation stability through retry, dependency, and alerting design"
+          ]
+        },
+        {
+          "title": "Domain-Driven Data Modeling & Automated Validation",
+          "details": [
+            "Decided normalization vs. denormalization based on user access patterns, and introduced proactive detection of unmapped records and outliers"
+          ]
+        },
+        {
+          "title": "Collaboration with Non-Developer & Analyst Stakeholders",
+          "details": [
+            "Liaised directly with public-sector clients, financial-sector clients, and in-house analysts, translating requirements into pipeline design"
+          ]
+        }
+      ],
+      "projects": [
+        {
+          "title": "Livestock Disease Prediction Data Pipeline — Animal & Plant Quarantine Agency (2025.06 ~ 2025.12)",
+          "details": [
+            "Built and operated ETL for ASF / HPAI / FMD prediction models in a closed-network environment (**9 DAGs**)",
+            "Improved legacy computation throughput by **12x (1 day → 2 hours)**",
+            "Achieved unattended-remote-operation stability via per-table task isolation + structured incident logging"
+          ]
+        },
+        {
+          "title": "Real Estate Price Data Pipeline (2025.04 ~ 2026.02)",
+          "details": [
+            "Operated monthly price generation/validation/delivery pipelines for financial-sector clients (**6 DAGs**, ~**13M records** on a 100m grid)",
+            "Refactored legacy logic, improving monthly price computation by **3x (6 hours → 2 hours)**",
+            "Introduced automated validation to pre-detect and correct grid-price / PNU mapping defects"
+          ]
+        },
+        {
+          "title": "Auction Data Collection Pipeline (2025.04 ~ 2026.02)",
+          "details": [
+            "Built an automated auction collection/processing pipeline for external sale (3 servers, **~2,000–3,000 records/day**)",
+            "Mitigated IP blocking and optimized targeted collection, achieving **2x collection speed-up** (12,000 → 4,000 records/day)",
+            "Designed denormalized tables with analyst usage in mind (composite PK: case_no + court + auction_date)"
+          ]
+        },
+        {
+          "title": "Road Intersection Network Construction (2025.03 ~ 2025.04)",
+          "details": [
+            "Extended nationwide road-intersection spatial data and designed analytical attributes for the in-house analytics team",
+            "Expanded spatial data **4.6x (18K → 84K nodes)** using QGIS + Python post-processing"
+          ]
+        }
+      ]
+    }
+  ],
+  "projects": [
+    {
+      "name": "Game MumulBot — Game-Specialized LLM Chatbot Data Pipeline",
+      "team": "2-person team / Sole owner of DE·AI data architecture (100%)",
+      "period": "2026.03 ~ Present",
+      "techStack": "Python, Airflow, PostgreSQL, pgvector, FastAPI, RAG, OpenAI, Next.js",
+      "portfolioLink": "https://portfolio-dun-psi-28.vercel.app/portfolio/game-chatbot-pipeline",
+      "highlights": [
+        {
+          "title": "Optimized Airflow-Based ETL Collection",
+          "details": [
+            "Separated static vs. dynamic collection cycles for Lost Ark / TFT APIs, **reducing per-character payload by 79% (82KB → 17KB)**",
+            "Built scalability headroom against API rate limits via this payload reduction"
+          ]
+        },
+        {
+          "title": "Unified RDBMS + Vector DB and Optimized RAG Performance",
+          "details": [
+            "Adopted pgvector to consolidate storage and optimized retrieval logic, **cutting token usage by 84%**"
+          ]
+        },
+        {
+          "title": "Normalized Semi-Structured (JSONB) Data and Built Self-Monitoring",
+          "details": [
+            "Flattened heavy semi-structured game data into numeric form, **boosting query performance by 5.3x (0.644ms → 0.121ms)**, and built a dashboard tracking LLM cost & token usage"
+          ]
+        }
+      ],
+      "link": "https://game.mumulbot.com/"
+    },
+    {
+      "name": "TFT Challenger Weekly Match Data Pipeline",
+      "team": "Solo",
+      "period": "2024.08 ~ 2024.10",
+      "techStack": "Python, Airflow, AWS Lambda, S3, PostgreSQL, SparkSQL, Tableau, Docker",
+      "highlights": [
+        "Resolved local Airflow heartbeat errors via a Lambda-decoupled architecture (Airflow as trigger only; invocation & processing on Lambda)",
+        "Triggered Lambdas in batches of 3 to handle API rate limits and minimize record loss",
+        "Operated 2 DAGs (user ingestion / game collection); modeled user-match-unit-trait relations across 6 normalized tables"
+      ],
+      "link": "https://github.com/guswns00123/TFT_data"
+    }
+  ],
+  "skills": [
+    {
+      "category": "Languages",
+      "items": [
+        "Python",
+        "SQL"
+      ]
+    },
+    {
+      "category": "Databases",
+      "items": [
+        "PostgreSQL",
+        "pgvector",
+        "Oracle"
+      ]
+    },
+    {
+      "category": "Data Engineering",
+      "items": [
+        "Apache Airflow",
+        "FastAPI",
+        "AWS Lambda",
+        "Hadoop"
+      ]
+    },
+    {
+      "category": "AI / LLM",
+      "items": [
+        "OpenAI API (Text-to-SQL · RAG)"
+      ]
+    },
+    {
+      "category": "Cloud / DevOps",
+      "items": [
+        "AWS (Lambda · S3)",
+        "Docker",
+        "Linux",
+        "Git"
+      ]
+    },
+    {
+      "category": "Spatial / Etc.",
+      "items": [
+        "QGIS",
+        "Selenium",
+        "Scrapy"
+      ]
+    }
+  ],
+  "education": [
+    {
+      "school": "The Chinese University of Hong Kong (CUHK)",
+      "degree": "B.Sc. in Computer Science",
+      "period": "2018.09 ~ 2025.03"
+    },
+    {
+      "school": "Sungmoon High School",
+      "degree": "Science Track, Graduated",
+      "period": "2013.03 ~ 2016.02"
+    }
+  ],
+  "certifications": [
+    {
+      "date": "2021.04",
+      "name": "SQLD (SQL Developer)",
+      "issuer": "K-DATA (Korea Data Agency)"
+    },
+    {
+      "date": "2024.02",
+      "name": "AWS Certified Cloud Practitioner",
+      "issuer": "Amazon Web Services"
+    }
+  ],
+  "languages": [
+    {
+      "language": "Korean",
+      "level": "Native"
+    },
+    {
+      "language": "English",
+      "level": "Business level (5+ years in Hong Kong; CUHK, English-medium instruction)"
+    }
+  ],
+  "links": [
+    {
+      "label": "Portfolio",
+      "url": "https://portfolio-dun-psi-28.vercel.app/portfolio"
+    },
+    {
+      "label": "GitHub",
+      "url": "https://github.com/guswns00123"
+    },
+    {
+      "label": "Blog (Tistory)",
+      "url": "https://guswns00123.tistory.com/"
+    },
+    {
+      "label": "Game MumulBot Demo",
+      "url": "https://game.mumulbot.com/"
+    }
+  ]
+}

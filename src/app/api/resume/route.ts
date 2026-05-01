@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
-import { getResume, saveResume, Resume } from "@/lib/resume";
+import { getResume, getResumeEn, saveResume, Resume } from "@/lib/resume";
 import { revalidatePath } from "next/cache";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const lang = req.nextUrl.searchParams.get("lang") === "en" ? "en" : "ko";
   try {
-    const resume = getResume();
+    const resume = lang === "en" ? getResumeEn() : getResume();
     return NextResponse.json(resume);
   } catch {
     return NextResponse.json({ error: "Failed to read resume" }, { status: 500 });
@@ -18,13 +19,14 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const lang = req.nextUrl.searchParams.get("lang") === "en" ? "en" : "ko";
   const body = (await req.json()) as Resume;
 
   if (!body || !body.personal || !Array.isArray(body.experiences)) {
     return NextResponse.json({ error: "Invalid resume payload" }, { status: 400 });
   }
 
-  saveResume(body);
+  saveResume(body, lang);
   revalidatePath("/resume");
 
   return NextResponse.json({ ok: true });

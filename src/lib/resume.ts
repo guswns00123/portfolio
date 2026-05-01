@@ -88,13 +88,20 @@ export type Resume = {
 };
 
 const resumeFilePath = path.join(process.cwd(), "content", "resume", "resume.json");
+const resumeFilePathEn = path.join(process.cwd(), "content", "resume", "resume.en.json");
 
 export function getResume(): Resume {
   const raw = fs.readFileSync(resumeFilePath, "utf-8");
   return JSON.parse(raw) as Resume;
 }
 
-export function saveResume(resume: Resume): void {
+export function getResumeEn(): Resume {
+  const raw = fs.readFileSync(resumeFilePathEn, "utf-8");
+  return JSON.parse(raw) as Resume;
+}
+
+export function saveResume(resume: Resume, lang: "ko" | "en" = "ko"): void {
   const json = JSON.stringify(resume, null, 2);
-  fs.writeFileSync(resumeFilePath, json + "\n", "utf-8");
+  const target = lang === "en" ? resumeFilePathEn : resumeFilePath;
+  fs.writeFileSync(target, json + "\n", "utf-8");
 }

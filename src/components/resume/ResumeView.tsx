@@ -2,24 +2,96 @@
 
 import { useState } from "react";
 import { useSession } from "next-auth/react";
-import { Printer, Pencil, Save, X } from "lucide-react";
+import { Printer, Pencil, Save, X, Languages } from "lucide-react";
 import type { Resume } from "@/lib/resume";
 
+type Lang = "ko" | "en";
+
 type Props = {
-  initial: Resume;
+  initialKo: Resume;
+  initialEn: Resume;
 };
 
-export default function ResumeView({ initial }: Props) {
+const i18n = {
+  ko: {
+    coreCompetencies: "[ 핵심 역량 ]",
+    summary: "자기소개",
+    experience: "경력 사항",
+    projects: "개인 / 팀 프로젝트",
+    skills: "기술 스택",
+    education: "학력",
+    certsAndLanguages: "자격증 및 어학",
+    portfolioLinks: "포트폴리오 / 링크",
+    keyResponsibilities: "주요 업무 및 역할",
+    keyProjects: "주요 프로젝트",
+    techStackLabel: "기술 스택:",
+    portfolioLinkText: "[상세 아키텍처 및 트러블슈팅 과정 포트폴리오 링크 🔗]",
+    edit: "수정",
+    savePdf: "PDF 저장",
+    editTitle: "이력서 편집 (JSON)",
+    cancel: "취소",
+    save: "저장",
+    saving: "저장 중...",
+    jsonError: "JSON 형식 오류 — 문법을 확인하세요.",
+    saveFailed: "저장 실패",
+    editHint: (
+      <>
+        저장하면 <code>content/resume/resume.json</code>이 갱신되고 페이지가 즉시 재검증됩니다.
+      </>
+    ),
+    langToggle: "EN",
+    contactBirthLabel: "🎂",
+    contactMilitaryLabel: "🪖",
+  },
+  en: {
+    coreCompetencies: "[ Core Competencies ]",
+    summary: "Profile",
+    experience: "Experience",
+    projects: "Personal / Team Projects",
+    skills: "Technical Skills",
+    education: "Education",
+    certsAndLanguages: "Certifications & Languages",
+    portfolioLinks: "Portfolio / Links",
+    keyResponsibilities: "Key Responsibilities",
+    keyProjects: "Key Projects",
+    techStackLabel: "Tech Stack:",
+    portfolioLinkText: "[Detailed Architecture & Troubleshooting Portfolio 🔗]",
+    edit: "Edit",
+    savePdf: "Save as PDF",
+    editTitle: "Edit Resume (JSON)",
+    cancel: "Cancel",
+    save: "Save",
+    saving: "Saving...",
+    jsonError: "Invalid JSON — please check the syntax.",
+    saveFailed: "Save failed",
+    editHint: (
+      <>
+        Saving updates <code>content/resume/resume.en.json</code> and the page is revalidated immediately.
+      </>
+    ),
+    langToggle: "한",
+    contactBirthLabel: "🎂",
+    contactMilitaryLabel: "🪖",
+  },
+} as const;
+
+export default function ResumeView({ initialKo, initialEn }: Props) {
   const { data: session } = useSession();
-  const [resume, setResume] = useState<Resume>(initial);
+  const [lang, setLang] = useState<Lang>("ko");
+  const [resumeKo, setResumeKo] = useState<Resume>(initialKo);
+  const [resumeEn, setResumeEn] = useState<Resume>(initialEn);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<string>(JSON.stringify(initial, null, 2));
+  const [draft, setDraft] = useState<string>("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const isAdmin = !!session?.user;
+  const resume = lang === "en" ? resumeEn : resumeKo;
+  const t = i18n[lang];
 
   const handlePrint = () => window.print();
+
+  const toggleLang = () => setLang((l) => (l === "ko" ? "en" : "ko"));
 
   const handleEdit = () => {
     setDraft(JSON.stringify(resume, null, 2));
@@ -40,25 +112,26 @@ export default function ResumeView({ initial }: Props) {
     try {
       parsed = JSON.parse(draft) as Resume;
     } catch {
-      setError("JSON 형식 오류 — 문법을 확인하세요.");
+      setError(t.jsonError);
       setSaving(false);
       return;
     }
 
     try {
-      const res = await fetch("/api/resume", {
+      const res = await fetch(`/api/resume?lang=${lang}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(parsed),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data?.error || "저장 실패");
+        throw new Error(data?.error || t.saveFailed);
       }
-      setResume(parsed);
+      if (lang === "en") setResumeEn(parsed);
+      else setResumeKo(parsed);
       setEditing(false);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "저장 실패";
+      const msg = e instanceof Error ? e.message : t.saveFailed;
       setError(msg);
     } finally {
       setSaving(false);
@@ -69,20 +142,22 @@ export default function ResumeView({ initial }: Props) {
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between gap-2">
-          <h1 className="text-xl font-bold">이력서 편집 (JSON)</h1>
+          <h1 className="text-xl font-bold">
+            {t.editTitle} <span className="text-muted-foreground text-sm font-normal">({lang.toUpperCase()})</span>
+          </h1>
           <div className="flex items-center gap-2">
             <button
               onClick={handleCancel}
               className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-accent transition-colors"
             >
-              <X className="h-3.5 w-3.5" /> 취소
+              <X className="h-3.5 w-3.5" /> {t.cancel}
             </button>
             <button
               onClick={handleSave}
               disabled={saving}
               className="inline-flex items-center gap-1.5 rounded-md border bg-foreground text-background px-3 py-1.5 text-sm hover:opacity-90 transition-opacity disabled:opacity-50"
             >
-              <Save className="h-3.5 w-3.5" /> {saving ? "저장 중..." : "저장"}
+              <Save className="h-3.5 w-3.5" /> {saving ? t.saving : t.save}
             </button>
           </div>
         </div>
@@ -97,35 +172,46 @@ export default function ResumeView({ initial }: Props) {
           spellCheck={false}
           className="font-mono text-xs leading-relaxed border rounded-md p-3 bg-muted/20 min-h-[70vh] resize-y"
         />
-        <p className="text-xs text-muted-foreground">
-          저장하면 <code>content/resume/resume.json</code>이 갱신되고 페이지가 즉시 재검증됩니다.
-        </p>
+        <p className="text-xs text-muted-foreground">{t.editHint}</p>
       </div>
     );
   }
 
   return (
     <div className="flex flex-col gap-6">
-      {/* 액션 바 — 관리자(로그인) 전용. 인쇄 시에도 숨김 */}
-      {isAdmin && (
-        <div className="flex items-center justify-end gap-2 print:hidden">
-          <button
-            onClick={handleEdit}
-            className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-accent transition-colors"
-          >
-            <Pencil className="h-3.5 w-3.5" /> 수정
-          </button>
-          <button
-            onClick={handlePrint}
-            className="inline-flex items-center gap-1.5 rounded-md border bg-foreground text-background px-3 py-1.5 text-sm hover:opacity-90 transition-opacity"
-          >
-            <Printer className="h-3.5 w-3.5" /> PDF 저장
-          </button>
-        </div>
-      )}
+      {/* 액션 바 — 언어 토글은 모두 노출, 수정/PDF는 관리자 전용. 인쇄 시 숨김 */}
+      <div className="flex items-center justify-end gap-2 print:hidden">
+        <button
+          onClick={toggleLang}
+          aria-label="Toggle language"
+          className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-accent transition-colors"
+        >
+          <Languages className="h-3.5 w-3.5" />
+          {t.langToggle}
+        </button>
+        {isAdmin && (
+          <>
+            <button
+              onClick={handleEdit}
+              className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-accent transition-colors"
+            >
+              <Pencil className="h-3.5 w-3.5" /> {t.edit}
+            </button>
+            <button
+              onClick={handlePrint}
+              className="inline-flex items-center gap-1.5 rounded-md border bg-foreground text-background px-3 py-1.5 text-sm hover:opacity-90 transition-opacity"
+            >
+              <Printer className="h-3.5 w-3.5" /> {t.savePdf}
+            </button>
+          </>
+        )}
+      </div>
 
       {/* 이력서 본문 */}
-      <article className="resume-doc bg-white text-slate-900 rounded-md border print:border-0 px-8 py-8 print:px-0 print:py-0 flex flex-col gap-7">
+      <article
+        lang={lang}
+        className="resume-doc bg-white text-slate-900 rounded-md border print:border-0 px-8 py-8 print:px-0 print:py-0 flex flex-col gap-7"
+      >
         {/* ── Header ── */}
         <header className="flex gap-6 items-start">
           {resume.personal.photo && (
@@ -138,19 +224,27 @@ export default function ResumeView({ initial }: Props) {
           )}
           <div className="flex-1 grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-6 items-start">
             <div className="flex flex-col gap-1.5">
-              <h1 className="text-4xl font-semibold tracking-[0.3em] text-slate-900">
-                {resume.personal.nameKo.split("").join(" ")}
+              <h1
+                className={
+                  lang === "ko"
+                    ? "text-4xl font-semibold tracking-[0.3em] text-slate-900"
+                    : "text-4xl font-semibold tracking-wide text-slate-900"
+                }
+              >
+                {lang === "ko"
+                  ? resume.personal.nameKo.split("").join(" ")
+                  : resume.personal.nameEn}
               </h1>
               <p className="text-base text-slate-600 mt-1">{resume.personal.title}</p>
               <dl className="flex flex-col gap-0.5 text-sm text-slate-700 mt-2">
                 <ContactRow icon="✉" value={resume.personal.email} />
                 <ContactRow icon="☎" value={resume.personal.phone} />
-                <ContactRow icon="🎂" value={resume.personal.birthdate} />
-                <ContactRow icon="🪖" value={resume.personal.military} />
+                <ContactRow icon={t.contactBirthLabel} value={resume.personal.birthdate} />
+                <ContactRow icon={t.contactMilitaryLabel} value={resume.personal.military} />
               </dl>
             </div>
             <aside className="rounded-md border-2 border-sky-300 bg-sky-50/30 px-4 py-3 min-w-[240px]">
-              <p className="text-sm font-bold text-slate-900 mb-2">[ 핵심 역량 ]</p>
+              <p className="text-sm font-bold text-slate-900 mb-2">{t.coreCompetencies}</p>
               <ul className="flex flex-col gap-1.5">
                 {resume.coreCompetencies.map((c, i) => (
                   <li key={i} className="text-[13px] text-slate-800 flex items-start gap-1.5 leading-snug">
@@ -164,7 +258,7 @@ export default function ResumeView({ initial }: Props) {
         </header>
 
         {/* ── 자기소개 ── */}
-        <Section emoji="📝" title="자기소개">
+        <Section emoji="📝" title={t.summary}>
           <div className="flex flex-col gap-3">
             {resume.summary.map((s, i) => (
               <div key={i} className="flex flex-col gap-1">
@@ -178,7 +272,7 @@ export default function ResumeView({ initial }: Props) {
         </Section>
 
         {/* ── 경력 사항 ── */}
-        <Section emoji="💼" title="경력 사항">
+        <Section emoji="💼" title={t.experience}>
           <div className="flex flex-col gap-6">
             {resume.experiences.map((exp, i) => (
               <TimelineRow
@@ -201,11 +295,11 @@ export default function ResumeView({ initial }: Props) {
                   )}
                 </h3>
 
-                <BlockHeader>주요 업무 및 역할</BlockHeader>
+                <BlockHeader>{t.keyResponsibilities}</BlockHeader>
                 <NestedBullets blocks={exp.responsibilities} />
 
                 <div className="mt-3" />
-                <BlockHeader>주요 프로젝트</BlockHeader>
+                <BlockHeader>{t.keyProjects}</BlockHeader>
                 <NestedBullets blocks={exp.projects} />
               </TimelineRow>
             ))}
@@ -213,7 +307,7 @@ export default function ResumeView({ initial }: Props) {
         </Section>
 
         {/* ── 개인 프로젝트 ── */}
-        <Section emoji="🚀" title="개인 / 팀 프로젝트">
+        <Section emoji="🚀" title={t.projects}>
           <div className="flex flex-col gap-5">
             {resume.projects.map((p, i) => (
               <TimelineRow key={i} period={p.period}>
@@ -225,7 +319,7 @@ export default function ResumeView({ initial }: Props) {
                 </h3>
                 {p.techStack && (
                   <p className="text-[13px] italic text-slate-500 mt-0.5 mb-1.5">
-                    기술 스택: {p.techStack}
+                    {t.techStackLabel} {p.techStack}
                   </p>
                 )}
                 {p.portfolioLink && (
@@ -235,7 +329,7 @@ export default function ResumeView({ initial }: Props) {
                     rel="noopener noreferrer"
                     className="text-[13px] text-sky-700 hover:opacity-70 mb-1.5 inline-block"
                   >
-                    [상세 아키텍처 및 트러블슈팅 과정 포트폴리오 링크 🔗]
+                    {t.portfolioLinkText}
                   </a>
                 )}
                 <ul className="flex flex-col gap-1.5">
@@ -291,7 +385,7 @@ export default function ResumeView({ initial }: Props) {
         </Section>
 
         {/* ── 기술 스택 ── */}
-        <Section emoji="🛠" title="기술 스택">
+        <Section emoji="🛠" title={t.skills}>
           <div className="flex flex-col">
             {resume.skills.map((g, i) => (
               <div
@@ -308,7 +402,7 @@ export default function ResumeView({ initial }: Props) {
         </Section>
 
         {/* ── 학력 ── */}
-        <Section emoji="🎓" title="학력">
+        <Section emoji="🎓" title={t.education}>
           <div className="flex flex-col gap-2">
             {resume.education.map((e, i) => (
               <TimelineRow key={i} period={e.period}>
@@ -325,7 +419,7 @@ export default function ResumeView({ initial }: Props) {
         </Section>
 
         {/* ── 자격증 및 어학 ── */}
-        <Section emoji="📜" title="자격증 및 어학">
+        <Section emoji="📜" title={t.certsAndLanguages}>
           <div className="flex flex-col gap-1.5">
             {resume.certifications.map((c, i) => (
               <TimelineRow key={`c-${i}`} period={c.date}>
@@ -347,7 +441,7 @@ export default function ResumeView({ initial }: Props) {
         </Section>
 
         {/* ── 포트폴리오 / 링크 ── */}
-        <Section emoji="📂" title="포트폴리오 / 링크">
+        <Section emoji="📂" title={t.portfolioLinks}>
           <ul className="flex flex-col gap-1">
             {resume.links.map((l, i) => (
               <li key={i} className="text-[13px] flex items-baseline gap-2 flex-wrap">

@@ -1,4 +1,4 @@
-import { getResume } from "@/lib/resume";
+import { getResume, getResumeEn } from "@/lib/resume";
 import ResumeView from "@/components/resume/ResumeView";
 
 export const metadata = {
@@ -7,6 +7,7 @@ export const metadata = {
 };
 
 export default function ResumePage() {
-  const resume = getResume();
-  return <ResumeView initial={resume} />;
+  const resumeKo = getResume();
+  const resumeEn = getResumeEn();
+  return <ResumeView initialKo={resumeKo} initialEn={resumeEn} />;
 }
