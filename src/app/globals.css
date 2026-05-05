@@ -311,4 +311,49 @@
     break-inside: avoid;
     page-break-inside: avoid;
   }
+
+  /* ── English print overrides — 영문은 글자 폭이 넓어 2페이지 유지 위해 더 타이트하게 ── */
+  .resume-doc[lang="en"] {
+    gap: 0.78rem !important;
+    line-height: 1.45 !important;
+  }
+
+  .resume-doc[lang="en"] .gap-7 { gap: 0.8rem !important; }
+  .resume-doc[lang="en"] .gap-6 { gap: 0.65rem !important; }
+  .resume-doc[lang="en"] .gap-5 { gap: 0.55rem !important; }
+  .resume-doc[lang="en"] .gap-4 { gap: 0.42rem !important; }
+  .resume-doc[lang="en"] .gap-3 { gap: 0.32rem !important; }
+  .resume-doc[lang="en"] .gap-2 { gap: 0.22rem !important; }
+  .resume-doc[lang="en"] .gap-1\.5 { gap: 0.15rem !important; }
+  .resume-doc[lang="en"] .gap-1 { gap: 0.12rem !important; }
+
+  /* 영문 이름은 자간을 좁게 — 한글 자간 처리(0.16em) 무력화 */
+  .resume-doc[lang="en"] > header h1 {
+    letter-spacing: 0.04em !important;
+    font-size: 1.15rem !important;
+  }
+
+  /* 영문은 본문 폰트 추가 축소 */
+  .resume-doc[lang="en"] .text-base { font-size: 8.5pt !important; }
+  .resume-doc[lang="en"] .text-sm { font-size: 8pt !important; }
+  .resume-doc[lang="en"] .text-xs { font-size: 7pt !important; }
+  .resume-doc[lang="en"] .text-lg { font-size: 9pt !important; }
+  .resume-doc[lang="en"] .text-\[15px\] { font-size: 8.5pt !important; }
+  .resume-doc[lang="en"] .text-\[14px\] { font-size: 7.8pt !important; }
+  .resume-doc[lang="en"] .text-\[13px\] { font-size: 7.3pt !important; }
+  .resume-doc[lang="en"] .text-\[12px\] { font-size: 6.8pt !important; }
+
+  /* 영문 margin 추가 축소 */
+  .resume-doc[lang="en"] .mt-2 { margin-top: 0.25rem !important; }
+  .resume-doc[lang="en"] .mt-1\.5 { margin-top: 0.18rem !important; }
+  .resume-doc[lang="en"] .mt-3 { margin-top: 0.35rem !important; }
+  .resume-doc[lang="en"] .mb-3 { margin-bottom: 0.3rem !important; }
+  .resume-doc[lang="en"] .mb-2 { margin-bottom: 0.22rem !important; }
+  .resume-doc[lang="en"] .mb-1\.5 { margin-bottom: 0.15rem !important; }
+
+  /* 영문 핵심 역량 박스도 좀 더 컴팩트 */
+  .resume-doc[lang="en"] aside {
+    padding: 0.3rem 0.45rem !important;
+    min-width: 200px !important;
+  }
 }
